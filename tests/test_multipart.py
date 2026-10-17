@@ -55,6 +55,27 @@ class MultipartTests(unittest.TestCase):
         self.assertEqual([part_number(path, self.config.scanner) for path in paths], [1, 2])
         self.assertEqual(group_files(paths, self.config.scanner), [paths])
 
+    def test_p_suffix_parts_share_identity_and_one_movie(self):
+        for stem in ('FC2-4953812', 'ssni00123'):
+            with self.subTest(stem=stem):
+                paths = self.files(f'{stem}-P1.strm', f'{stem}-P2.strm')
+                self.assertEqual([part_number(path, self.config.scanner) for path in paths], [1, 2])
+                self.assertEqual(group_files(paths, self.config.scanner), [paths])
+                self.data['scanner']['input_files'] = list(map(str, paths))
+                self.config = Cfg.model_validate(self.data)
+                movies = scan_movies(str(paths[0]))
+                self.assertEqual(len(movies), 1)
+                self.assertEqual(movies[0].part_numbers, [1, 2])
+
+    def test_p_part_suffix_does_not_truncate_cid_prefixes_ending_in_p(self):
+        from javsp.multipart import media_identity
+        for cid in ('118abp00123', 'abp00123', 'sdmp00123', 'h_1234abp00123'):
+            with self.subTest(cid=cid):
+                self.assertEqual(media_identity(cid + '.mp4', self.config.scanner), ('cid', cid))
+                self.assertIsNone(part_number(cid + '.mp4', self.config.scanner))
+                for suffix in ('-P1', '_P2'):
+                    self.assertEqual(media_identity(cid + suffix + '.mp4', self.config.scanner), ('cid', cid))
+
     def test_identifiers_are_not_parts(self):
         for name in ('ABC-123.mp4', 'FC2-4953812.mp4', '080826_01.mp4', 'HEYDOUGA-1234-123.mp4'):
             with self.subTest(name=name):
@@ -125,6 +146,35 @@ class MultipartTests(unittest.TestCase):
         self.assertTrue(all(path.exists() for path in paths))
         for number, original in enumerate(paths, 1):
             self.assertTrue(os.path.samefile(original, output / f'FC2-4953812-CD{number}.strm'))
+
+    def test_cross_drive_log_path_does_not_abort_file_organization(self):
+        for hard_link in (False, True):
+            with self.subTest(hard_link=hard_link):
+                incoming = f'incoming-{hard_link}'
+                paths = self.files(f'{incoming}/FC2-4953812-1.mp4',
+                                   f'{incoming}/FC2-4953812-2.mp4')
+                movie = scan_movies(str(paths[0].parent))[0]
+                output = self.root / f'output-{hard_link}'
+                output.mkdir()
+                movie.save_dir, movie.basename = str(output), movie.dvdid
+                destinations = [output / f'FC2-4953812-CD{number}.mp4'
+                                for number in (1, 2)]
+                for destination in destinations:
+                    destination.write_bytes(b'old video')
+                # Windows cannot make a C: path relative to an F: cwd.
+                # Simulate only that logging boundary; keep file I/O real.
+                with patch('javsp.datatype.os.path.relpath', side_effect=ValueError(
+                        "path is on mount 'C:', start on mount 'F:'")), \
+                     self.assertLogs('javsp.datatype', level='INFO') as logs:
+                    movie.rename_files(use_hardlink=hard_link, policy='always')
+                self.assertEqual(movie.new_paths, list(map(str, destinations)))
+                for source, destination in zip(paths, destinations):
+                    self.assertEqual(destination.read_bytes(), b'x' * 20)
+                    self.assertEqual(source.exists(), hard_link)
+                    if hard_link:
+                        self.assertTrue(os.path.samefile(source, destination))
+                    self.assertTrue(any(str(source) in line for line in logs.output))
+                self.assertFalse(list(output.glob('.javsp-backup-*')))
 
     def test_manifest_excludes_siblings_and_keeps_small_tail(self):
         paths = self.files('FC2-4953812-1.mp4', 'FC2-4953812-2.mp4', 'ABC-123.mp4')
@@ -233,6 +283,27 @@ class MultipartTests(unittest.TestCase):
         self.assertTrue(all(path.read_bytes() == b'x' * 20 for path in paths))
         self.assertTrue(all(path.read_bytes() == b'original' for path in targets))
         self.assertFalse(list(output.glob('.javsp-backup-*')))
+
+    def test_cross_drive_log_path_does_not_interrupt_organization(self):
+        for hardlink in (False, True):
+            with self.subTest(hardlink=hardlink):
+                source = self.files(f'incoming-{hardlink}/ABC-123.mp4')[0]
+                movie = scan_movies(str(source))[0]
+                output = self.root / f'output-{hardlink}'
+                output.mkdir()
+                target = output / 'ABC-123.mp4'
+                target.write_bytes(b'old video')
+                movie.save_dir, movie.basename = str(output), 'ABC-123'
+                # Windows cannot express a C: media path relative to an F: cwd.
+                with patch('javsp.datatype.os.path.relpath', side_effect=ValueError(
+                        "path is on mount 'C:', start on mount 'F:'")):
+                    movie.rename_files(use_hardlink=hardlink, policy='always')
+                self.assertEqual(target.read_bytes(), b'x' * 20)
+                self.assertEqual(movie.new_paths, [str(target)])
+                self.assertEqual(source.exists(), hardlink)
+                if hardlink:
+                    self.assertTrue(os.path.samefile(source, target))
+                self.assertFalse(list(output.glob('.javsp-backup-*')))
 
     def test_never_preserves_existing_artwork_before_downloads(self):
         source = self.files('incoming/ABC-123.mp4')[0]

@@ -73,10 +73,14 @@ from .storage import (
     write_config,
 )
 from .qbittorrent import QbittorrentError, delete_torrent, list_downloads, set_share_limits, set_torrent_transfer_limits, test_connection
-from .media import connection_error, list_media_libraries, overview_libraries, playback_links, sync_media_server
+from .media import connection_error, list_media_libraries, overview_libraries, playback_links, sync_media_server, media_sessions, seek_media
 from .tasks import NoScrapeTasksError, active_schedule_task_ids, cancel_task, cancel_tasks, create_tasks, delete_task, get_cover_path, get_fanart_path, get_task, google_captcha_browser_active, google_cover_thumbnail, list_task_summaries, recover_interrupted_tasks, retry_task_images, restore_task_files, save_uploaded_cover, search_google_cover, select_google_cover, update_task_metadata
 from .timeutils import local_now, timezone_name
 from .artwork import image_response
+from .avatars import avatar_directory, avatar_url
+from . import library as film_library
+from .media import catalog_task, catalog_image, update_catalog_metadata, clear_catalog_cache
+from .tasks import edit_task_artwork
 from .task_store import overview_groups as load_overview_groups, run_counts, start_artwork_path_repair
 from . import updater
 
@@ -541,8 +545,7 @@ def save_community_session(body: CommunitySessionBody, response: Response, user:
     from .storage import user_profile
     if not re.fullmatch(re.escape(body.comment_username) + r"#[A-Z0-9]{4}", body.display_name):
         raise HTTPException(status_code=422, detail="评论身份无效")
-    avatars = json.loads((WEB_DIR / "assets" / "avatar-catalog.json").read_text(encoding="utf-8"))
-    if body.avatar_id and body.avatar_id not in {item["id"] for item in avatars}:
+    if body.avatar_id and body.avatar_id not in avatar_directory():
         raise HTTPException(status_code=422, detail="请从头像库选择头像")
     response.headers["Cache-Control"] = "no-store"
     return user_profile(user["username"], community=body.model_dump())
@@ -569,11 +572,18 @@ def save_profile(body: ProfileBody, response: Response, user: dict = Depends(cur
     name = body.display_name.strip()
     if not name or any(ord(c) < 32 for c in name):
         raise HTTPException(status_code=422, detail="请填写有效的用户名")
-    avatars = json.loads((WEB_DIR / "assets" / "avatar-catalog.json").read_text(encoding="utf-8"))
-    if body.avatar_id and body.avatar_id not in {item["id"] for item in avatars}:
+    if body.avatar_id and body.avatar_id not in avatar_directory():
         raise HTTPException(status_code=422, detail="请从头像库选择头像")
     response.headers["Cache-Control"] = "no-store"
     return user_profile(user["username"], {"display_name": name, "avatar_id": body.avatar_id})
+
+
+@app.get('/api/avatars/{avatar_id}')
+def avatar_image(avatar_id: str) -> Response:
+    url = avatar_url(avatar_id)
+    if not url:
+        raise HTTPException(404, '头像不存在')
+    return Response(status_code=302, headers={'Location': url, 'Cache-Control': 'public, max-age=86400'})
 
 
 def _validate_password_change(body: UserBody, required: bool = False) -> None:
@@ -1271,15 +1281,12 @@ def tasks(request: Request, limit: int | None = Query(default=None, ge=1, le=500
           date_from: str = '', date_to: str = '', sort: Literal['created_at', 'publish_date'] = 'created_at',
           direction: Literal['asc', 'desc'] = 'desc', group_by: Literal['', 'library', 'actress', 'producer', 'year'] = '',
           group: str = Query(default='', max_length=500), _: dict = Depends(current_user)) -> Response:
-    filters = {}
-    if view == 'overview' and group_by:
-        roots = []
-        if group_by == 'library':
-            roots = next((library['roots'] for library in overview_libraries() if library['key'] == group), [])
-        filters = {'group_by': group_by, 'group': group, 'group_roots': roots}
+    if view == 'overview':
+        return _etag_json(request, film_library.overview_page(limit or 24, offset, overview_libraries(),
+            group_by=group_by, group=group, query=query, sort=sort, direction=direction))
     result = list_task_summaries(limit, offset, view=view, query=query, field=field, status=status,
                                size_min=size_min, size_max=size_max, date_from=date_from,
-                               date_to=date_to, sort=sort, direction=direction, **filters)
+                               date_to=date_to, sort=sort, direction=direction)
     return _etag_json(request, result)
 
 
@@ -1293,13 +1300,11 @@ def _etag_json(request: Request, result: dict) -> Response:
 
 
 @app.get("/api/tasks/overview-groups")
-def task_overview_groups(request: Request, by: Literal['library', 'actress', 'producer', 'year'] = 'actress',
+def task_overview_groups(request: Request, by: Literal['all', 'library', 'actress', 'producer', 'year'] = 'all',
                          offset: int = Query(default=0, ge=0), limit: int = Query(default=24, ge=1, le=120),
                          query: str = Query(default='', max_length=200), _: dict = Depends(current_user)) -> Response:
     libraries = overview_libraries()
-    if by == 'library' and not libraries:
-        by = 'actress'
-    result = load_overview_groups(by, offset, limit, query.strip(), libraries)
+    result = film_library.overview_groups(by, offset, limit, query.strip(), libraries)
     result['libraries_available'] = bool(libraries)
     return _etag_json(request, result)
 
@@ -1316,7 +1321,7 @@ def start_task(body: TaskBody, _: dict = Depends(current_user)) -> dict:
 
 @app.get("/api/tasks/{task_id}")
 def task(task_id: str, _: dict = Depends(current_user)) -> dict:
-    item = get_task(task_id)
+    item = catalog_task(task_id) if task_id.startswith('media-') else get_task(task_id)
     if not item:
         raise HTTPException(status_code=404, detail="任务不存在")
     return item
@@ -1324,7 +1329,7 @@ def task(task_id: str, _: dict = Depends(current_user)) -> dict:
 
 @app.get("/api/tasks/{task_id}/playback")
 def task_playback(task_id: str, _: dict = Depends(current_user)) -> dict:
-    item = get_task(task_id)
+    item = catalog_task(task_id) if task_id.startswith('media-') else get_task(task_id)
     if not item:
         raise HTTPException(404, "任务不存在")
     try:
@@ -1336,12 +1341,46 @@ def task_playback(task_id: str, _: dict = Depends(current_user)) -> dict:
     return {"links": links}
 
 
+@app.get("/api/tasks/{task_id}/playback/sessions")
+def task_playback_sessions(task_id: str, _: dict = Depends(current_user)) -> dict:
+    item = catalog_task(task_id) if task_id.startswith('media-') else get_task(task_id)
+    if not item: raise HTTPException(404, "任务不存在")
+    try: return {"sessions": media_sessions(item)}
+    except Exception as exc: raise HTTPException(400, "媒体库会话读取失败：" + connection_error(exc)) from exc
+
+
+class PlaybackSeekBody(BaseModel):
+    server_id: str = Field(min_length=1, max_length=128)
+    session_id: str = Field(min_length=1, max_length=256)
+    seconds: int = Field(ge=0, le=604800)
+
+
+@app.post("/api/tasks/{task_id}/playback/seek")
+def task_playback_seek(task_id: str, body: PlaybackSeekBody, _: dict = Depends(current_user)) -> dict:
+    item = catalog_task(task_id) if task_id.startswith('media-') else get_task(task_id)
+    if not item: raise HTTPException(404, "任务不存在")
+    try:
+        seek_media(item, body.server_id, body.session_id, body.seconds)
+    except ValueError as exc: raise HTTPException(400, "媒体库跳转失败：" + str(exc)) from exc
+    except Exception as exc: raise HTTPException(400, "媒体库跳转失败：" + connection_error(exc)) from exc
+    return {"ok": True, "seconds": body.seconds}
+
+
 @app.patch("/api/tasks/{task_id}/metadata")
 def update_task_details(task_id: str, body: TaskMetadataBody, _: dict = Depends(current_user)) -> dict:
+<<<<<<< HEAD
     try:
         result = update_task_metadata(task_id, body.model_dump(), body.apply_to_folder)
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"写入 NFO 失败：{exc}") from exc
+=======
+    if task_id.startswith('media-'):
+        try:
+            return {'ok': True, **update_catalog_metadata(task_id, body.model_dump())}
+        except Exception as exc:
+            raise HTTPException(400, '媒体库资料保存失败：' + connection_error(exc)) from exc
+    result = update_task_metadata(task_id, body.model_dump(), body.apply_to_folder)
+>>>>>>> e7b7a97f9ee239d6acfedb7f5739d742edb78b55
     if result is None:
         raise HTTPException(status_code=400, detail="任务不存在，或任务仍在运行中")
     return {"ok": True, **result}
@@ -1349,6 +1388,8 @@ def update_task_details(task_id: str, body: TaskMetadataBody, _: dict = Depends(
 
 @app.get("/api/tasks/{task_id}/cover/{index:int}")
 def task_cover(task_id: str, index: int, request: Request, thumbnail: bool = False, _: dict = Depends(current_user)) -> Response:
+    if task_id.startswith('media-'):
+        return _media_image_response(task_id, 'cover', index)
     path = get_cover_path(task_id, index)
     if not path or not path.is_file():
         raise HTTPException(status_code=404, detail="封面不存在")
@@ -1357,10 +1398,57 @@ def task_cover(task_id: str, index: int, request: Request, thumbnail: bool = Fal
 
 @app.get("/api/tasks/{task_id}/fanart/{index:int}")
 def task_fanart(task_id: str, index: int, request: Request, _: dict = Depends(current_user)) -> Response:
+    if task_id.startswith('media-'):
+        return _media_image_response(task_id, 'fanart', index)
     path = get_fanart_path(task_id, index)
     if not path or not path.is_file():
         raise HTTPException(status_code=404, detail="剧照不存在")
     return image_response(path, request)
+
+
+def _media_image_response(task_id, kind, index):
+    try:
+        response = catalog_image(task_id, kind, index)
+        return Response(response.content, media_type=response.headers.get('Content-Type', 'image/jpeg'),
+                        headers={'Cache-Control': 'private, max-age=300'})
+    except Exception as exc:
+        raise HTTPException(404, '媒体库图片读取失败') from exc
+
+
+@app.put('/api/tasks/{task_id}/artwork/{kind}/{index}')
+async def put_task_artwork(task_id: str, kind: Literal['cover', 'fanart'], index: int,
+                           file: UploadFile = File(...), _: dict = Depends(current_user)):
+    content = await file.read(16 * 1024 * 1024 + 1)
+    try:
+        if index < -1 or not content or len(content) > 16 * 1024 * 1024:
+            raise ValueError('图片位置无效或文件超过 16 MB')
+        if task_id.startswith('media-'):
+            import io
+            from PIL import Image, ImageOps
+            with Image.open(io.BytesIO(content)) as image:
+                image = ImageOps.exif_transpose(image).convert('RGB')
+                buffer = io.BytesIO()
+                image.save(buffer, 'JPEG', quality=92)
+            catalog_image(task_id, kind, index, content=buffer.getvalue())
+        else:
+            edit_task_artwork(task_id, kind, index, content)
+    except (OSError, ValueError, requests.RequestException) as exc:
+        raise HTTPException(400, '图片保存失败，请确认文件格式、影片状态及媒体库写入权限') from exc
+    return {'ok': True}
+
+
+@app.delete('/api/tasks/{task_id}/artwork/{kind}/{index}')
+def remove_task_artwork(task_id: str, kind: Literal['cover', 'fanart'], index: int, _: dict = Depends(current_user)):
+    try:
+        if index < 0:
+            raise ValueError('图片位置无效')
+        if task_id.startswith('media-'):
+            catalog_image(task_id, kind, index, delete=True)
+        else:
+            edit_task_artwork(task_id, kind, index, delete=True)
+    except (OSError, ValueError, requests.RequestException) as exc:
+        raise HTTPException(400, '图片删除失败，请刷新后重试并确认写入权限') from exc
+    return {'ok': True}
 
 
 def _public_media_server(server: dict) -> dict:
@@ -1426,6 +1514,7 @@ def create_media_server(body: MediaServerBody, _: dict = Depends(require_admin))
     servers = list_media_servers()
     servers.append(server)
     save_media_servers(servers)
+    clear_catalog_cache()
     return _public_media_server(server)
 
 
@@ -1440,6 +1529,7 @@ def update_media_server(server_id: str, body: MediaServerBody, _: dict = Depends
     servers = list_media_servers()
     servers[index] = server
     save_media_servers(servers)
+    clear_catalog_cache()
     return _public_media_server(server)
 
 
@@ -1449,6 +1539,7 @@ def remove_media_server(server_id: str, _: dict = Depends(require_admin)) -> dic
     if len(servers) == len(list_media_servers()):
         raise HTTPException(status_code=404, detail="媒体服务器不存在")
     save_media_servers(servers)
+    clear_catalog_cache()
     return {"ok": True}
 
 
@@ -1458,6 +1549,7 @@ def sync_configured_media_server(server_id: str, _: dict = Depends(require_admin
     if server is None:
         raise HTTPException(status_code=404, detail="媒体服务器不存在")
     try:
+        clear_catalog_cache()
         return sync_media_server(server)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="媒体库同步失败: " + connection_error(exc)) from exc

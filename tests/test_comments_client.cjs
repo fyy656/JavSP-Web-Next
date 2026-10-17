@@ -6,26 +6,28 @@ const source = fs.readFileSync(require('node:path').join(__dirname, '../javsp_we
 const moduleSource = source.slice(source.indexOf('window.JavspComments ='), source.indexOf('\nfunction formatLocalDateTime'));
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function harness() {
-  const nodes = new Map(), events = {}, requests = [], saved = new Map();
+  const nodes = new Map(), events = {}, requests = [], saved = new Map(), played = [];
   const node = key => {
-    if (!nodes.has(key)) nodes.set(key, { value: '', textContent: '', innerHTML: '', hidden: false, disabled: false, addEventListener() {} });
+    if (!nodes.has(key)) nodes.set(key, { value: '', textContent: '', innerHTML: '', hidden: false, disabled: false, focus() {}, addEventListener() {} });
     return nodes.get(key);
   };
   const section = node('section');
   section.querySelector = node;
   const form = { elements: { nickname: node('[name=nickname]'), body: node('body') }, querySelector: node, closest: selector => selector === '#task-comments form' ? form : null };
   const context = vm.createContext({
-    window: { JavspCommunity: { configure() {}, headers: () => ({ 'X-User-Token': 'test-user' }), identity: () => ({nickname:'tester',avatar_id:''}), avatar: () => '', requireIdentity: async () => {}, verify: async () => 'verified' } }, document: { addEventListener: (event, fn) => { events[event] = fn; } },
+    window: { markdownit: require('../javsp_web/web/assets/markdown-it.min.js'), JavspCommunity: { configure() {}, headers: () => ({ 'X-User-Token': 'test-user' }), identity: () => ({nickname:'tester',avatar_id:''}), avatar: () => '', requireIdentity: async () => {}, verify: async () => 'verified', withChallenge: async (_action, send) => send('verified') } }, document: { addEventListener: (event, fn) => { events[event] = fn; } },
     $: selector => selector === '#task-comments' ? section : node(selector),
     escapeHtml: value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'),
     localStorage: { getItem: key => saved.get(key), setItem: (key, value) => saved.set(key, value) },
     AbortController, setTimeout, clearTimeout,
-    fetch: (url, options) => new Promise((resolve, reject) => requests.push({ url, options, resolve: (data, status = 200) => resolve({ ok: status < 400, json: async () => data }), reject })),
+    playTask: async (button, seconds) => played.push({id:button.dataset.playTask,seconds}),
+    fetch: (url, options) => new Promise((resolve, reject) => requests.push({ url, options, resolve: (data, status = 200) => resolve({ ok: status < 400, status, json: async () => data }), reject })),
   });
+  vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'../javsp_web/web/assets/comment-markdown.js'),'utf8'),context);
   vm.runInContext(moduleSource, context);
   const click = selector => events.click({ target: { closest: value => value === '#task-comments ' + selector ? node(selector) : null } });
   const submit = () => events.submit({ target: form, preventDefault() {} });
-  return { api: context.window.JavspComments, community: context.window.JavspCommunity, requests, node, section, form, click, submit, saved };
+  return { api: context.window.JavspComments, community: context.window.JavspCommunity, requests, node, section, form, click, submit, saved, played };
 }
 test('same movie refresh preserves drafts; closing aborts requests and ignores stale responses', async () => {
   const h = harness(); h.api.open('ABC-001', 'https://comments.test');
@@ -42,12 +44,12 @@ test('same movie refresh preserves drafts; closing aborts requests and ignores s
 test('pagination appends escaped comments and retry keeps existing results', async () => {
   const h = harness(); h.api.open('ABC-001', 'https://comments.test');
   h.requests[0].resolve({ items: [{ id: 3, body: '<script>bad</script>', nickname: '<img>' }], next_cursor: 3 }); await tick();
-  assert.match(h.node('.comments-list').innerHTML, /&lt;script>/); assert.doesNotMatch(h.node('.comments-list').innerHTML, /<img>/);
+  assert.match(h.node('.comments-list').innerHTML, /&lt;script&gt;/); assert.doesNotMatch(h.node('.comments-list').innerHTML, /<img>/);
   assert.equal(h.node('[data-comment-more]').hidden, false);
   const loading = h.click('[data-comment-more]');
   assert.match(h.requests[1].url, /before=3/);
   h.requests[1].resolve({ detail: '暂时不可用' }, 503); await loading;
-  assert.match(h.node('.comments-list').innerHTML, /&lt;script>/);
+  assert.match(h.node('.comments-list').innerHTML, /&lt;script&gt;/);
   const retry = h.click('[data-comment-more]');
   h.requests[2].resolve({ items: [{ id: 2, body: 'older comment' }], next_cursor: null }); await retry;
   assert.equal(h.node('.comments-status').textContent, '2 条评论'); assert.equal(h.node('[data-comment-more]').hidden, true);
@@ -71,6 +73,16 @@ test('disabled service or unidentified movie makes no external request', () => {
   h.api.open('', 'https://comments.test'); assert.equal(h.requests.length, 0);
 });
 
+test('normal posting sends no proof and a challenge response triggers only one retry', async()=>{
+ const h=harness();h.api.open('ABC-001','https://comments.test');h.requests[0].resolve({items:[]});await tick();
+ h.community.withChallenge=async(_action,send)=>{try{return await send('');}catch(error){if(error.status!==428)throw error;return send('verified');}};
+ h.form.elements.body.value='keep text';const pending=h.submit();await tick();
+ assert.equal(JSON.parse(h.requests[1].options.body).turnstile_token,undefined);
+ h.requests[1].resolve({challenge:{action:'comment'}},428);await tick();
+ assert.equal(h.requests.length,3);assert.equal(JSON.parse(h.requests[2].options.body).turnstile_token,'verified');
+ h.requests[2].resolve({comment:{status:'pending'}},201);await pending;assert.equal(h.form.elements.body.value,'');
+});
+
 test('unconfigured identity preserves comment draft and does not start a challenge or post', async () => {
   const h = harness(); h.api.open('ABC-001','https://comments.test');
   h.requests[0].resolve({items:[]}); await tick();
@@ -83,4 +95,58 @@ test('unconfigured identity preserves comment draft and does not start a challen
   assert.equal(h.form.elements.body.value,'keep my draft');
   assert.match(h.node('.comment-form-message').textContent,/登录评论身份/);
   assert.equal(h.node('button[type="submit"]').disabled,false);
+});
+
+test('reply selection preserves drafts, submits the parent and clears only after success', async () => {
+  const h=harness(); h.api.open('ABC-001','https://comments.test');
+  h.requests[0].resolve({items:[{id:5,nickname:'<Alice>',body:'parent text'}]}); await tick();
+  assert.match(h.node('.comments-list').innerHTML,/data-comment-reply="5"/);
+  h.form.elements.body.value='draft reply';
+  h.node('[data-comment-reply]').dataset={commentReply:'5'};
+  await h.click('[data-comment-reply]');
+  assert.equal(h.node('.comment-reply-context').hidden,false);
+  assert.match(h.node('.comment-reply-label').textContent,/<Alice>/);
+  assert.equal(h.form.elements.body.value,'draft reply');
+  const failed=h.submit(); await tick();
+  assert.equal(JSON.parse(h.requests[1].options.body).reply_to_id,5);
+  h.requests[1].resolve({detail:'稍后再试'},429);await failed;
+  assert.equal(h.node('.comment-reply-context').hidden,false);
+  assert.equal(h.form.elements.body.value,'draft reply');
+  const success=h.submit();await tick();
+  h.requests[2].resolve({comment:{status:'pending'}},201);await success;
+  assert.equal(h.node('.comment-reply-context').hidden,true);
+  assert.equal(h.form.elements.body.value,'');
+});
+
+test('cancel reply preserves text and a new movie cannot inherit a reply target', async()=>{
+  const h=harness();h.api.open('ABC-001','https://comments.test');
+  h.requests[0].resolve({items:[{id:5,nickname:'Alice',body:'parent'}]});await tick();
+  h.node('[data-comment-reply]').dataset={commentReply:'5'};
+  await h.click('[data-comment-reply]');h.form.elements.body.value='draft';
+  await h.click('[data-comment-reply-cancel]');
+  assert.equal(h.node('.comment-reply-context').hidden,true);
+  assert.equal(h.form.elements.body.value,'draft');
+  await h.click('[data-comment-reply]');
+  h.api.open('ABC-002','https://comments.test');h.requests[1].resolve({items:[]});await tick();
+  const sent=h.submit();await tick();
+  assert.equal(JSON.parse(h.requests[2].options.body).reply_to_id,undefined);
+  h.requests[2].resolve({comment:{status:'pending'}},201);await sent;
+});
+
+test('reply references escape parent content and safely label unavailable comments',async()=>{
+  const h=harness();h.api.open('ABC-001','https://comments.test');
+  h.requests[0].resolve({items:[{id:7,body:'reply',reply_to_id:5,reply_to:{id:5,nickname:'<Alice>',body:'<img src=x>'}},{id:8,body:'reply two',reply_to_id:4,reply_to:null}]});await tick();
+  const html=h.node('.comments-list').innerHTML;
+  assert.match(html,/回复/);assert.match(html,/&lt;Alice>/);assert.match(html,/&lt;img/);
+  assert.doesNotMatch(html,/<img src=x>/);assert.match(html,/原评论已不可见/);
+});
+
+test('comments render Markdown and form help documents the 300 character cap',async()=>{
+ const h=harness();h.api.open('ABC-001','https://comments.test','task/1');
+ h.requests[0].resolve({items:[{id:1,body:'**粗体** 30:15'}]});await tick();
+ assert.match(h.node('.comments-list').innerHTML,/<strong>粗体<\/strong>/);
+ assert.match(h.node('.comments-list').innerHTML,/data-comment-time="1815"/);
+ assert.match(h.section.innerHTML,/maxlength="600"/);assert.match(h.section.innerHTML,/comment-help/);
+ h.form.elements.body.value='x'.repeat(301);await h.submit();
+ assert.equal(h.requests.length,1);assert.match(h.node('.comment-form-message').textContent,/300/);
 });
