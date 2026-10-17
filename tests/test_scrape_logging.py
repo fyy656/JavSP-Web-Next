@@ -66,6 +66,65 @@ class LogTests(unittest.TestCase):
 
         self.assertEqual(_process_failure_reason(['影片刮削失败: extrafanart 已存在']), 'extrafanart 已存在')
 
+    def test_summarized_crawler_failure_survives_log_rendering(self):
+        from javsp_web.task_logs import build_log_entries, readable_error
+        from javsp_web.tasks import _crawler_failure_summary
+
+        lines = [
+            event('crawler', name='javsp.web.javlib', status='failed', reason='403 Client Error: Forbidden for url: https://x'),
+            event('crawler', name='javsp.web.avsox', status='not_found', reason='未找到影片'),
+        ]
+        summary = _crawler_failure_summary(lines)
+        self.assertIn('javlib 403 拒绝', readable_error(summary))
+        rows = build_log_entries(lines, 'failed', summary)
+        detail = next(row['detail'] for row in rows if row['group'] == 'result' and row['message'] == '任务失败')
+        self.assertIn('javlib 403 拒绝', detail)
+        self.assertIn('1 个来源未收录该番号', detail)
+
+    def test_blocked_crawlers_explain_the_proxy_hint(self):
+        from javsp_web.tasks import _crawler_failure_summary
+
+        lines = [
+            event('crawler', name='javsp.web.javlib', status='failed', reason='403 Client Error: Forbidden for url: https://x'),
+            event('crawler', name='javsp.web.jav321', status='failed', reason="SSLError(SSLCertVerificationError(1, 'Hostname mismatch'))"),
+            event('crawler', name='javsp.web.javbus', status='failed', reason='Document is empty'),
+        ]
+        summary = _crawler_failure_summary(lines)
+        self.assertIn('所有来源都被拒绝或不可达', summary)
+        self.assertIn('javlib 403 拒绝', summary)
+        self.assertIn('代理', summary)
+
+    def test_mixed_crawler_failures_report_both_causes(self):
+        from javsp_web.tasks import _crawler_failure_summary
+
+        lines = [
+            event('crawler', name='javsp.web.javlib', status='failed', reason='403 Client Error'),
+            event('crawler', name='javsp.web.avsox', status='not_found', reason="javsp.web.avsox: 未找到影片: 'EYS-099'"),
+            event('crawler', name='javsp.web.mgstage', status='not_found', reason='mgstage: 未找到影片'),
+        ]
+        summary = _crawler_failure_summary(lines)
+        self.assertIn('1 个来源被拒绝或不可达', summary)
+        self.assertIn('2 个来源未收录该番号', summary)
+
+    def test_crawler_summary_ignores_retry_then_success_and_plain_not_found(self):
+        from javsp_web.tasks import _crawler_failure_summary
+
+        retried = [
+            event('crawler', name='javsp.web.javbus', status='retrying', attempt=1, reason='connection timeout'),
+            event('crawler', name='javsp.web.javbus', status='success', reason=''),
+        ]
+        self.assertEqual(_crawler_failure_summary(retried), '')
+        self.assertEqual(_crawler_failure_summary([event('crawler', name='javsp.web.avsox', status='not_found', reason='未找到影片')]), '')
+
+    def test_failure_text_prefers_the_actionable_summary(self):
+        from javsp_web.tasks import _failure_error_text
+
+        self.assertEqual(_failure_error_text(no_result=True, summary='所有来源都被拒绝或不可达（javlib 403 拒绝）', reason='ignored', code=1),
+                         '所有来源都被拒绝或不可达（javlib 403 拒绝）')
+        self.assertEqual(_failure_error_text(no_result=True, summary='', reason='', code=1), '抓取器均未获取到影片信息')
+        self.assertEqual(_failure_error_text(no_result=False, summary='ignored', reason='封面下载失败', code=1), '封面下载失败')
+        self.assertEqual(_failure_error_text(no_result=False, summary='', reason='', code=9), 'JavSP 执行失败（退出码: 9）')
+
     def test_file_exists_failure_is_actionable(self):
         for error in ('[WinError 183] 文件已存在', 'FileExistsError: extrafanart', '[Errno 17] File exists'):
             with self.subTest(error=error):
@@ -224,23 +283,31 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(movie.cover, 'https://example.com/cover.jpg')
         self.assertIsNone(movie.publish_date)
 
-    def test_javmenu_missing_container_is_semantic_error(self):
+    def test_javmenu_page_without_detail_meta_is_not_found(self):
+        """站点改版后详情只在 meta 里；没有 meta 的页面按“未收录”处理。"""
         response = requests.Response()
-        response.url = 'https://mrzyx.xyz/TEST-001'
-        for content, exception in [('<html>unknown page</html>', WebsiteError), ('<html>Just a moment</html>', SiteBlocked)]:
+        response.url = 'https://javmenu.com/zh/TEST-001'
+        for content in ('<html>unknown page</html>', '<html><head><meta property="og:title" content="猜你喜欢"></head></html>'):
             with patch.object(javmenu.request, 'get', return_value=response), patch.object(javmenu, 'resp2html', return_value=lxml.html.fromstring(content)):
-                with self.assertRaises(exception):
+                with self.assertRaises(MovieNotFoundError):
                     javmenu.parse_data(MovieInfo('TEST-001'))
 
-    def test_javmenu_reordered_classes_and_optional_fields(self):
+    def test_javmenu_parses_meta_description_and_cover(self):
         response = requests.Response()
-        response.url = 'https://mrzyx.xyz/TEST-001/'
-        response.history = [requests.Response()]
-        html = lxml.html.fromstring('<div class="px-0 extra col-md-9"><h1>TEST-001 演示标题</h1><div class="single-video"></div></div>')
+        response.url = 'https://javmenu.com/zh/TEST-001'
+        html = lxml.html.fromstring(
+            '<html><head><meta property="og:title" content="TEST-001 演示标题">'
+            '<meta name="description" content="发佈日期为2025-09-23，主演女优是Alice、Bob，影片时长90分钟，主题为巨乳、单体作品。">'
+            '</head><body><img data-src="https://c0.jdbstatic.com/covers/bk/bKGpqB.jpg"></body></html>')
         movie = MovieInfo('TEST-001')
         with patch.object(javmenu.request, 'get', return_value=response), patch.object(javmenu, 'resp2html', return_value=html):
             javmenu.parse_data(movie)
         self.assertEqual(movie.title, '演示标题')
+        self.assertEqual(movie.cover, 'https://c0.jdbstatic.com/covers/bk/bKGpqB.jpg')
+        self.assertEqual(movie.publish_date, '2025-09-23')
+        self.assertEqual(movie.actress, ['Alice', 'Bob'])
+        self.assertEqual(movie.duration, '90')
+        self.assertEqual(movie.genre, ['巨乳', '单体作品'])
 
 
 class RetryTests(unittest.TestCase):

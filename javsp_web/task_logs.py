@@ -26,6 +26,10 @@ def _organization_result(outcome: dict) -> tuple[str, str]:
 
 def readable_error(value: object) -> str:
     text = str(value or "未知错误").strip()
+    # 已经归纳好的多来源结论（例如“4 个来源被拒绝或不可达（…），4 个来源未收录该番号”）
+    # 原样保留，否则会被下面的单站点分支改写成笼统提示，反而丢掉关键信息。
+    if "来源" in text and any(word in text for word in ("被拒绝", "不可达", "未收录")):
+        return re.sub(r"\s+", " ", text)[:260]
     if "CERTIFICATE_VERIFY_FAILED" in text or "certificate verify failed" in text:
         return "HTTPS 证书验证失败，请检查系统 CA、代理证书及站点证书链"
     if "403" in text or "Forbidden" in text:

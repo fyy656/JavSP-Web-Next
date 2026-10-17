@@ -132,6 +132,35 @@ async function verifyUpdateOverlay() {
   assert.equal(element('#update-settings-message').textContent, '当前还有运行中的任务');
 }
 
+async function verifyBatchTaskStop() {
+  // 批量停止：一个请求带上要停止的 ID；不带 ID 表示停止全部
+  const requests = [];
+  const toasts = [];
+  let confirmRun;
+  const context = vm.createContext({
+    state: { tasks: [], selectedOverviewTasks: new Set(['a']) },
+    $: () => ({ textContent: '' }),
+    api: async (url, options) => { requests.push({ url, body: JSON.parse(options.body) }); return { ok: true, cancelled: 2 }; },
+    confirmAction: ({ run }) => { confirmRun = run; },
+    showToast: message => toasts.push(message),
+    loadTasks: async () => {},
+  });
+  vm.runInContext(source.slice(source.indexOf('function stopTasks('), source.indexOf('async function deleteTaskInDialog(')), context);
+  context.stopAllTasks();
+  await confirmRun();
+  assert.deepEqual(requests[0], { url: '/api/tasks/cancel', body: { ids: [] } }, 'stop-all must ask the server to stop everything');
+  assert.equal(context.state.selectedOverviewTasks.size, 1, 'stop-all must not drop unrelated selections');
+  assert.match(toasts[0], /已停止 2 个任务/);
+  context.stopTasks(['a', 'a', 'b']);
+  await confirmRun();
+  assert.deepEqual(requests[1].body, { ids: ['a', 'b'] }, 'selected stops must send unique IDs');
+  assert.equal(context.state.selectedOverviewTasks.size, 0, 'stopped selections must be cleared');
+  const markup = fs.readFileSync(path.join(__dirname, '../javsp_web/web/assets/app.js'), 'utf8');
+  for (const button of ['id="task-stop-all"', 'id="overview-stop-all"', 'id="overview-cancel-selected"']) {
+    assert.ok(markup.includes(button), `missing stop control ${button}`);
+  }
+}
+
 async function main() {
   let count = 0;
   let release;
@@ -178,6 +207,7 @@ async function main() {
   await verifyUpdateOverlay();
   await verifyReportedVersion();
   await verifyChannelSwitchSubmission();
-  console.log('Web client regression checks passed: version normalization, shared GET, ETag, timeout/retry, update overlay.');
+  await verifyBatchTaskStop();
+  console.log('Web client regression checks passed: version normalization, shared GET, ETag, timeout/retry, update overlay, batch stop.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

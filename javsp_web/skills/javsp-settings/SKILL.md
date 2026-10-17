@@ -16,13 +16,22 @@ description: 为 JavSP WEB 更改刮削预设、创建预设和定时刮削规�
 
 所有修改仅生成待确认操作。创建启用规则会按时间自动整理文件，要让用户看到路径、预设、时间和启用状态。依赖前一操作的新 ID 时，等待确认返回真实 ID 后再提议下一操作。
 
-例如启用剧照下载：
+例如启用剧照下载，并把剧照文件夹命名为“番号-extrafanart”：
 
 ```json
-{"preset_id":"实际预设ID","changes":{"summarizer":{"extra_fanarts":{"enabled":true}}}}
+{"preset_id":"实际预设ID","changes":{"summarizer":{"extra_fanarts":{"enabled":true,"folder_prefix":"{num}-"}}}}
 ```
 
+`extra_fanarts.folder_prefix` 支持与封面、NFO 等文件名相同的变量；实际文件夹名是「前缀 + extrafanart」，留空即 `extrafanart`。
+
 扫描配置在 `scanner`，数据源与必需字段在 `crawler`，输出与图片在 `summarizer`，翻译在 `translator`。修改前读取实际结构，不猜字段。原有翻译引擎使用预设配置；AI 翻译复用系统 AI 接入的模型，具体规则先读取 `javsp-translate`。
+
+网络设置（`network`）决定能否抓到数据，诊断抓取失败时先看这里：
+
+- `proxy_server` 支持 HTTP、SOCKS5、SOCKS5H；留空表示直连。
+- `proxy_free` 是**未配置代理时**使用的站点地址：`javbus`、`javdb` 在配置了代理后会改用官网，这两项随之失效；`avsox` 始终使用它；`javlib` 会依次尝试它、内置免代理地址和官网。
+- 把 `javbus` 填成官网（`https://www.javbus.com/`）又没有可用代理时，javbus 会被反爬拦截，表现为“反爬空响应 / 文档为空”。要么改回内置镜像（默认 `https://www.seedmm.help`），要么配置可用代理。
+- `airav`、`jav321`、`mgstage`、`prestige` 没有镜像可换，只能通过可用代理访问；`mgstage`、`prestige`、FC2、FANZA 还要求日本出口 IP。先让用户用“连通性测试”确认代理可用与出口地区，再决定改预设。
 
 AI 总开关：管理员在“系统设置 → AI 接入”打开“启用 AI 刮削”，开放对话、预设 AI 刮削和翻译能力。内置助手没有修改模型连接或总开关的工具，不能通过改预设代替开启系统能力。
 

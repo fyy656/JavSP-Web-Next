@@ -185,6 +185,143 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(len(children), 1)
         self.assertEqual(children[0]['input_files'], list(map(str, paths)))
 
+    def mount_file(self, relative):
+        path = self.root / 'mount' / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'x' * 20)
+        return path
+
+    def scan_children(self, scan):
+        tasks._run_task(scan)
+        return storage.get_task_record(scan['id']), self.children(scan)
+
+    def test_skip_nfo_dir_ignores_folders_that_already_have_nfo(self):
+        self.mount_file('ABC-123/ABC-123.mp4')
+        self.mount_file('ABC-123/movie.nfo')
+        fresh = self.mount_file('DEF-456/DEF-456.mp4')
+        self.config['scanner']['skip_nfo_dir'] = True
+        result, children = self.scan_children(self.submit(self.root / 'mount'))
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual([child['input_files'] for child in children], [[str(fresh)]])
+
+    def test_nfo_below_the_movie_folder_does_not_skip_it(self):
+        video = self.mount_file('ABC-123/ABC-123.mp4')
+        self.mount_file('ABC-123/subtitles/notes.nfo')
+        self.config['scanner']['skip_nfo_dir'] = True
+        result, children = self.scan_children(self.submit(self.root / 'mount'))
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual([child['input_files'] for child in children], [[str(video)]])
+
+    def test_ignored_folder_name_pattern_skips_output_folders(self):
+        self.mount_file('#整理完成/ABC-123/ABC-123.mp4')
+        fresh = self.mount_file('DEF-456/DEF-456.mp4')
+        result, children = self.scan_children(self.submit(self.root / 'mount'))
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual([child['input_files'] for child in children], [[str(fresh)]])
+
+    def test_filename_extensions_follow_the_preset(self):
+        self.mount_file('ABC-123.mp4')
+        mkv = self.mount_file('DEF-456.mkv')
+        self.config['scanner']['filename_extensions'] = ['.mkv']
+        result, children = self.scan_children(self.submit(self.root / 'mount'))
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual([child['input_files'] for child in children], [[str(mkv)]])
+
+    def test_explicit_selection_bypasses_directory_filters(self):
+        scraped = self.mount_file('ABC-123/ABC-123.mp4')
+        self.mount_file('ABC-123/movie.nfo')
+        self.config['scanner']['skip_nfo_dir'] = True
+        result, children = self.scan_children(self.submit(scraped.parent, [scraped]))
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual([child['input_files'] for child in children], [[str(scraped)]])
+
+    def test_all_skipped_folders_explain_the_reason(self):
+        self.mount_file('ABC-123/ABC-123.mp4')
+        self.mount_file('ABC-123/movie.nfo')
+        self.config['scanner']['skip_nfo_dir'] = True
+        result, children = self.scan_children(self.submit(self.root / 'mount'))
+        self.assertEqual(children, [])
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('已有 NFO', result['error'])
+
+    def test_empty_filename_extensions_report_a_clear_error(self):
+        self.mount_file('ABC-123/ABC-123.mp4')
+        self.config['scanner']['filename_extensions'] = []
+        result, children = self.scan_children(self.submit(self.root / 'mount'))
+        self.assertEqual(children, [])
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('视频文件扩展名为空', result['error'])
+
+    def test_library_scan_skips_scraped_folders_and_keeps_letter_parts_together(self):
+        """端到端复现用户库形态：已刮削目录跳过，字母分片合成一部影片。"""
+        self.mount_file('ABF-055/ABF-055.MP4')
+        self.mount_file('ABF-055/ABF-055.nfo')
+        self.mount_file('ABF-055/movie.nfo')
+        self.mount_file('FCDSS-027/FCDSS-027-A.MP4')
+        self.mount_file('FCDSS-027/FCDSS-027-B.MP4')
+        self.mount_file('SNOS-039-4K/SNOS-039-4K.mkv')
+        self.mount_file('本編/本編_4k.mp4')
+        self.config['scanner']['skip_nfo_dir'] = True
+        self.config['scanner']['filename_extensions'] = ['.mp4', '.mkv']
+        result, children = self.scan_children(self.submit(self.root / 'mount'))
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(
+            sorted(sorted(Path(path).name for path in child['input_files']) for child in children),
+            sorted([['FCDSS-027-A.MP4', 'FCDSS-027-B.MP4'], ['SNOS-039-4K.mkv'], ['本編_4k.mp4']]),
+        )
+
+    def task_record(self, task_id, status):
+        return {'id': task_id, 'created_at': '2026-09-23T12:00:00+00:00', 'status': status,
+                'input_directory': str(self.root / f'{task_id}.mp4'), 'file_name': task_id, 'size_bytes': 1024}
+
+    def test_cancel_all_stops_queued_and_running_tasks_only(self):
+        storage.save_tasks([self.task_record('q1', 'queued'), self.task_record('q2', 'queued'),
+                            self.task_record('r1', 'running'), self.task_record('ok', 'succeeded'),
+                            self.task_record('bad', 'failed')])
+        self.assertEqual(tasks.cancel_tasks(), 3)
+        self.assertEqual({item['id']: item['status'] for item in storage.load_tasks()},
+                         {'q1': 'cancelled', 'q2': 'cancelled', 'r1': 'cancelled', 'ok': 'succeeded', 'bad': 'failed'})
+
+    def test_cancel_selected_tasks_leaves_other_queued_tasks_alone(self):
+        storage.save_tasks([self.task_record('q1', 'queued'), self.task_record('q2', 'queued')])
+        self.assertEqual(tasks.cancel_tasks({'q1'}), 1)
+        self.assertEqual(storage.get_task_record('q1')['status'], 'cancelled')
+        self.assertEqual(storage.get_task_record('q2')['status'], 'queued')
+
+    def test_cancel_api_reports_the_stopped_count(self):
+        storage.save_tasks([self.task_record('q1', 'queued'), self.task_record('q2', 'queued'), self.task_record('ok', 'succeeded')])
+        response = self.client.post('/api/tasks/cancel', json={})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'ok': True, 'cancelled': 2})
+        storage.save_tasks([self.task_record('q3', 'queued')])
+        self.assertEqual(self.client.post('/api/tasks/cancel', json={'ids': ['q3', 'ok']}).json()['cancelled'], 1)
+        self.assertEqual(storage.get_task_record('q3')['status'], 'cancelled')
+        self.assertEqual(self.client.post('/api/tasks/cancel', json={'ids': ['ok']}).json()['cancelled'], 0)
+
+    def test_worker_survives_a_broken_task_record(self):
+        """A raising take-task step must not kill the worker: the queue would freeze."""
+        ran = threading.Event()
+        calls = {'count': 0}
+
+        def take_pending():
+            calls['count'] += 1
+            if calls['count'] == 1:
+                raise ValueError('损坏的任务记录')
+            if calls['count'] == 2:
+                tasks._worker_batches['probe'] = tasks._worker_batches.get('probe', 0) + 1
+                return {'id': 'probe', 'batch_id': 'probe', 'task_concurrency': 1, 'status': 'queued'}, 'probe'
+            raise SystemExit  # 结束本次测试线程
+
+        with patch.object(tasks, '_take_pending_task', side_effect=take_pending), \
+             patch.object(tasks, '_run_task', side_effect=lambda task: ran.set()), \
+             patch.object(tasks, '_worker_batches', {}), \
+             patch.object(tasks.logging, 'exception'):  # 这次取任务失败会被记录，测试里静音
+            worker = threading.Thread(target=tasks._task_worker, daemon=True)
+            worker.start()
+            self.assertTrue(ran.wait(5), '工作线程被一次异常终止，队列会永远停住')
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+
     def test_media_type_filter_skips_unmatched_ad_files(self):
         paths = self.files('FC2-4953812-1.mp4', '台湾uu美少女直播 20年信誉保证服务全球.mp4', '社 区 最 新 情 報.mp4')
         self.config['scanner']['only_match_media_types'] = True

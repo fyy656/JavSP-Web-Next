@@ -74,7 +74,7 @@ from .storage import (
 )
 from .qbittorrent import QbittorrentError, delete_torrent, list_downloads, set_share_limits, set_torrent_transfer_limits, test_connection
 from .media import connection_error, list_media_libraries, overview_libraries, playback_links, sync_media_server
-from .tasks import NoScrapeTasksError, active_schedule_task_ids, cancel_task, create_tasks, delete_task, get_cover_path, get_fanart_path, get_task, google_captcha_browser_active, google_cover_thumbnail, list_task_summaries, recover_interrupted_tasks, retry_task_images, restore_task_files, save_uploaded_cover, search_google_cover, select_google_cover, update_task_metadata
+from .tasks import NoScrapeTasksError, active_schedule_task_ids, cancel_task, cancel_tasks, create_tasks, delete_task, get_cover_path, get_fanart_path, get_task, google_captcha_browser_active, google_cover_thumbnail, list_task_summaries, recover_interrupted_tasks, retry_task_images, restore_task_files, save_uploaded_cover, search_google_cover, select_google_cover, update_task_metadata
 from .timeutils import local_now, timezone_name
 from .artwork import image_response
 from .task_store import overview_groups as load_overview_groups, run_counts, start_artwork_path_repair
@@ -194,6 +194,12 @@ class CrawlerTestBody(BaseModel):
     input_value: str = Field(min_length=1, max_length=256)
 
 
+class CancelTasksBody(BaseModel):
+    """要停止的任务 ID；留空表示停止全部排队中/运行中的任务。"""
+
+    ids: list[str] = Field(default_factory=list, max_length=2000)
+
+
 class TaskBody(BaseModel):
     input_directory: str = Field(min_length=1)
     preset_id: str = "default"
@@ -283,9 +289,11 @@ class QbittorrentManagementBody(BaseModel):
     takeover_enabled: bool = False
     takeover_tags: str = Field(default="", max_length=512)
     takeover_category: str = Field(default="", max_length=256)
-    ratio_limit: float = Field(default=-1, ge=-1, le=100000)
-    seeding_time_limit: int = Field(default=-1, ge=-1, le=10_000_000)
-    inactive_seeding_time_limit: int = Field(default=-1, ge=-1, le=10_000_000)
+    # 分享率/做种时间沿用 qBittorrent 的取值约定：-2 沿用全局、-1 不限制、>=0 为阈值。
+    # 默认用 -2，开启接管时不会把用户的全局做种策略改成“永久做种”。
+    ratio_limit: float = Field(default=-2, ge=-2, le=100000)
+    seeding_time_limit: int = Field(default=-2, ge=-2, le=10_000_000)
+    inactive_seeding_time_limit: int = Field(default=-2, ge=-2, le=10_000_000)
     download_limit_kib: int = Field(default=-1, ge=-1, le=10_000_000)
     upload_limit_kib: int = Field(default=-1, ge=-1, le=10_000_000)
     auto_remove: bool = False
@@ -1330,7 +1338,10 @@ def task_playback(task_id: str, _: dict = Depends(current_user)) -> dict:
 
 @app.patch("/api/tasks/{task_id}/metadata")
 def update_task_details(task_id: str, body: TaskMetadataBody, _: dict = Depends(current_user)) -> dict:
-    result = update_task_metadata(task_id, body.model_dump(), body.apply_to_folder)
+    try:
+        result = update_task_metadata(task_id, body.model_dump(), body.apply_to_folder)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"写入 NFO 失败：{exc}") from exc
     if result is None:
         raise HTTPException(status_code=400, detail="任务不存在，或任务仍在运行中")
     return {"ok": True, **result}
@@ -1610,9 +1621,9 @@ def _public_qbittorrent_management(settings: dict) -> dict:
         "takeover_enabled": bool(settings.get("takeover_enabled")),
         "takeover_tags": settings.get("takeover_tags", ""),
         "takeover_category": settings.get("takeover_category", ""),
-        "ratio_limit": settings.get("ratio_limit", -1),
-        "seeding_time_limit": settings.get("seeding_time_limit", -1),
-        "inactive_seeding_time_limit": settings.get("inactive_seeding_time_limit", -1),
+        "ratio_limit": settings.get("ratio_limit", -2),
+        "seeding_time_limit": settings.get("seeding_time_limit", -2),
+        "inactive_seeding_time_limit": settings.get("inactive_seeding_time_limit", -2),
         "download_limit_kib": settings.get("download_limit_kib", -1),
         "upload_limit_kib": settings.get("upload_limit_kib", -1),
         "auto_remove": bool(settings.get("auto_remove")),
@@ -1798,9 +1809,9 @@ def _auto_remove_downloads(settings: dict, downloads: list[dict], management: di
     for item in downloads:
         if not management.get("auto_remove") or item.get("progress", 0) < 100:
             continue
-        ratio_limit = float(management.get("ratio_limit", -1))
-        seed_limit = int(management.get("seeding_time_limit", -1))
-        inactive_limit = int(management.get("inactive_seeding_time_limit", -1))
+        ratio_limit = float(management.get("ratio_limit", -2))
+        seed_limit = int(management.get("seeding_time_limit", -2))
+        inactive_limit = int(management.get("inactive_seeding_time_limit", -2))
         reached = (ratio_limit >= 0 and item.get("ratio", 0) >= ratio_limit) or (seed_limit >= 0 and item.get("seeding_time", 0) >= seed_limit * 60) or (inactive_limit >= 0 and item.get("inactive_seeding_time", 0) >= inactive_limit * 60)
         if reached:
             delete_torrent(settings, item["hash"])
@@ -2074,28 +2085,58 @@ def _auto_scrape_schedule_worker() -> None:
 threading.Thread(target=_auto_scrape_schedule_worker, name="auto-scrape-scheduler", daemon=True).start()
 
 
+def _torrent_limits_match(item: dict, management: dict) -> bool:
+    """True when the torrent already carries the configured limits.
+
+    qBittorrent accepts repeated identical writes, but every tick used to send three
+    requests per managed torrent (speed limits plus share limits). Skip the ones that
+    already match; a manual change in qBittorrent is still reverted on the next tick.
+    """
+    download = int(management.get("download_limit_kib", -1))
+    upload = int(management.get("upload_limit_kib", -1))
+    expected_download = 0 if download < 0 else download * 1024
+    expected_upload = 0 if upload < 0 else upload * 1024
+    if item.get("download_limit") != expected_download or item.get("upload_limit") != expected_upload:
+        return False
+    for key, fallback in (("ratio_limit", -2), ("seeding_time_limit", -2), ("inactive_seeding_time_limit", -2)):
+        try:
+            if float(item.get(key, fallback)) != float(management.get(key, fallback)):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _run_qbittorrent_management_once() -> None:
+    """One takeover/auto-scrape pass over every configured downloader."""
+    management = get_qbittorrent_management()
+    if not (management.get("takeover_enabled") or any(rule.get("enabled") for rule in _auto_scrape_rules(management))):
+        return
+    for settings in list_downloaders():
+        try:
+            downloads = list_downloads(settings)
+            managed = [item for item in downloads if _managed_download(item, management)]
+            if management.get("takeover_enabled"):
+                for item in managed:
+                    if _torrent_limits_match(item, management):
+                        continue
+                    set_torrent_transfer_limits(
+                        settings,
+                        item["hash"],
+                        int(management.get("download_limit_kib", -1)),
+                        int(management.get("upload_limit_kib", -1)),
+                    )
+                    set_share_limits(settings, item["hash"], management)
+                _auto_remove_downloads(settings, managed, management)
+            _auto_scrape_downloads(settings, downloads, management)
+        except QbittorrentError:
+            continue
+
+
 def _qbittorrent_management_worker() -> None:
     while True:
         try:
-            management = get_qbittorrent_management()
-            if management.get("takeover_enabled") or any(rule.get("enabled") for rule in _auto_scrape_rules(management)):
-                for settings in list_downloaders():
-                    try:
-                        downloads = list_downloads(settings)
-                        managed = [item for item in downloads if _managed_download(item, management)]
-                        if management.get("takeover_enabled"):
-                            for item in managed:
-                                set_torrent_transfer_limits(
-                                    settings,
-                                    item["hash"],
-                                    int(management.get("download_limit_kib", -1)),
-                                    int(management.get("upload_limit_kib", -1)),
-                                )
-                                set_share_limits(settings, item["hash"], management)
-                            _auto_remove_downloads(settings, managed, management)
-                        _auto_scrape_downloads(settings, downloads, management)
-                    except QbittorrentError:
-                        continue
+            _run_qbittorrent_management_once()
         except QbittorrentError:
             pass
         time.sleep(60)
@@ -2109,6 +2150,12 @@ def stop_task(task_id: str, _: dict = Depends(current_user)) -> dict:
     if not cancel_task(task_id):
         raise HTTPException(status_code=400, detail="任务当前不可取消")
     return {"ok": True}
+
+
+@app.post("/api/tasks/cancel")
+def stop_tasks(body: CancelTasksBody, _: dict = Depends(current_user)) -> dict:
+    """停止排队中与运行中的任务；body.ids 为空表示停止全部。"""
+    return {"ok": True, "cancelled": cancel_tasks(set(body.ids) if body.ids else None)}
 
 
 @app.post("/api/tasks/{task_id}/images/retry")

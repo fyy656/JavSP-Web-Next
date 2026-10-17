@@ -56,11 +56,18 @@ def _take_pending_task():
 
 def _task_worker():
     while True:
-        with _queue_condition:
-            selected = _take_pending_task()
-            while selected is None:
-                _queue_condition.wait()
+        try:
+            with _queue_condition:
                 selected = _take_pending_task()
+                while selected is None:
+                    _queue_condition.wait()
+                    selected = _take_pending_task()
+        except Exception:
+            # 一条损坏的任务记录不能让工作线程静默消失：线程数只增不减，
+            # 全部退出后队列会永远停在原地，界面上只看到一直“等待中”。
+            logging.exception('任务工作线程取任务失败，已跳过本轮')
+            time.sleep(0.5)
+            continue
         task, batch = selected
         try:
             _run_task(task)
@@ -91,6 +98,7 @@ def _enqueue_task(task):
 _processes: dict[str, subprocess.Popen] = {}
 _logs: dict[str, list[str]] = {}
 _deleted_tasks: set[str] = set()
+_MAX_DELETED_TASK_IDS = 4096
 _cancelled_tasks: set[str] = set()
 _google_captcha_sessions: dict[str, dict] = {}
 _google_captcha_sessions_lock = threading.RLock()
@@ -107,6 +115,7 @@ _IMAGE_TRANSFER_RE = re.compile(r"^(?:Downloading extrafanart \d+ from url:|[^\s
 _NATIVE_PROGRESS_LOG_RE = re.compile(r"^已下载剧照\s+\d+/\d+:")
 _MAX_LOG_LINES = 5000
 _MAX_DISPLAY_LOG_LINES = 1500
+_MAX_STILLS_DIR_COUNT = 48
 _GOOGLE_CAPTCHA_TIMEOUT = 300
 _BYTE_SIZE_RE = re.compile(r"^\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>[kmgtpe]?i?b)?\s*$", re.IGNORECASE)
 _COVER_CRAWLER_MARKER = "JAVSP_WEB_COVER_CRAWL "
@@ -178,6 +187,68 @@ def _process_failure_reason(lines: list[str]) -> str:
             if reason:
                 return reason
     return ""
+
+
+# 站点拒绝/不可达的常见信号 → 面向用户的说法
+_CRAWLER_ISSUE_LABELS = (
+    ("403", "403 拒绝"), ("forbidden", "403 拒绝"),
+    ("521", "站点错误 521"), ("502", "站点错误 502"), ("503", "站点错误 503"), ("429", "请求过于频繁"),
+    ("certificate", "证书错误"), ("ssl", "证书错误"),
+    ("timed out", "超时"), ("timeout", "超时"),
+    ("connection reset", "连接被重置"), ("connection aborted", "连接被重置"), ("max retries", "连接失败"),
+    ("document is empty", "反爬空响应"), ("driver-verify", "反爬验证"), ("cloudflare", "反爬验证"),
+    ("地区", "地区限制"), ("region", "地区限制"),
+    ("list index out of range", "页面结构变化"),
+)
+_CRAWLER_NOT_FOUND_HINTS = ("未找到影片", "not found")
+
+
+def _crawler_failure_summary(lines: list[str]) -> str:
+    """Explain why the configured crawlers found nothing.
+
+    ``抓取器均未获取到影片信息`` hides whether the sites were blocked or simply do not
+    carry the title; users otherwise retry forever instead of configuring a proxy.
+    """
+    blocked: dict[str, str] = {}
+    missing: set[str] = set()
+    latest: dict[str, tuple[str, str]] = {}
+    for raw in lines:
+        marker = raw.find("JAVSP_PROGRESS ")
+        if marker < 0:
+            continue
+        try:
+            event = json.loads(raw[marker + len("JAVSP_PROGRESS "):])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict) or event.get("stage") != "crawler":
+            continue
+        name = str(event.get("name") or "").removeprefix("javsp.web.").strip()
+        if name:
+            # 同一来源会有 running/retrying/最终状态多条事件，只看最后一条
+            latest[name] = (str(event.get("status") or ""), str(event.get("reason") or ""))
+    for name, (status, reason) in latest.items():
+        if status == "success":
+            continue
+        lowered = reason.casefold()
+        if status == "not_found" or any(hint in lowered for hint in _CRAWLER_NOT_FOUND_HINTS):
+            missing.add(name)
+            continue
+        label = next((text for token, text in _CRAWLER_ISSUE_LABELS if token in lowered), "")
+        if label:
+            blocked[name] = label
+    if not blocked:
+        return ""
+    detail = "、".join(f"{name} {label}" for name, label in list(blocked.items())[:3])
+    if missing:
+        return f"{len(blocked)} 个来源被拒绝或不可达（{detail}），{len(missing)} 个来源未收录该番号"
+    return f"所有来源都被拒绝或不可达（{detail}）；请检查预设中的代理与站点镜像后重试"
+
+
+def _failure_error_text(*, no_result: bool, summary: str, reason: str, code: int | None) -> str:
+    """Pick the most useful failure message for a finished worker process."""
+    if no_result:
+        return summary or "抓取器均未获取到影片信息"
+    return reason or f"JavSP 执行失败（退出码: {code}）"
 
 
 def _task_name(input_path: str) -> str:
@@ -263,6 +334,69 @@ def _passes_minimum_size(path: Path, minimum_size: int, config_data: dict) -> bo
         return path.stat().st_size >= minimum_size
     except OSError:
         return False
+
+
+def _video_extensions(scanner) -> set[str]:
+    """Video extensions from the preset, so discovery matches the scraping engine."""
+    configured = {str(value).strip().lower() for value in (getattr(scanner, "filename_extensions", None) or []) if str(value).strip()}
+    if not configured:
+        # The engine would match nothing at all; fail with an actionable message
+        # instead of silently creating tasks that cannot be scraped.
+        raise ValueError("预设中的视频文件扩展名为空，请至少填写一项（例如 .mp4）")
+    return {value if value.startswith(".") else "." + value for value in configured}
+
+
+class _DirectoryFilter:
+    """Directory-level rules the engine applies while walking a folder.
+
+    ``os.walk`` in the engine prunes a whole subtree when the directory matches
+    ``ignored_folder_name_pattern`` or, with ``skip_nfo_dir``, when a ``.nfo`` file sits
+    directly inside it. Discovery used to ignore both, so every scan queued folders that
+    the CLI would have skipped — including folders this program had already scraped.
+    """
+
+    def __init__(self, root: Path, scanner) -> None:
+        self.root = root
+        self.skip_nfo_dir = bool(getattr(scanner, "skip_nfo_dir", False))
+        patterns = [str(value) for value in (getattr(scanner, "ignored_folder_name_pattern", None) or []) if str(value)]
+        try:
+            self.ignored = re.compile("|".join(patterns)) if patterns else None
+        except re.error:
+            # A broken preset pattern must not make the whole scan unusable.
+            self.ignored = None
+        self._decisions: dict[Path, bool] = {}
+        self.skipped_files = 0
+
+    def prunes(self, path: Path) -> bool:
+        """True when any folder between the scan root and this file is skipped."""
+        chain: list[Path] = []
+        parent = path.parent
+        while parent != self.root and parent != parent.parent:
+            chain.append(parent)
+            parent = parent.parent
+        for directory in reversed(chain):
+            if self._skipped(directory):
+                self.skipped_files += 1
+                return True
+        return False
+
+    def _skipped(self, directory: Path) -> bool:
+        decision = self._decisions.get(directory)
+        if decision is None:
+            decision = self._decide(directory)
+            self._decisions[directory] = decision
+        return decision
+
+    def _decide(self, directory: Path) -> bool:
+        if self.ignored is not None and self.ignored.match(directory.name):
+            return True
+        if not self.skip_nfo_dir:
+            return False
+        try:
+            return any(name.lower().endswith(".nfo") for name in os.listdir(directory))
+        except OSError:
+            # Unreadable folders are reported by the caller as before.
+            return False
 
 
 def _clean_log_lines(lines: list[str]) -> list[str]:
@@ -419,8 +553,12 @@ def _artwork_availability(task: dict, output: dict) -> dict:
     sources = task.get("image_sources") or (task.get("progress") or {}).get("image_sources") or {}
     expected_fanart = len(sources.get("preview_pics") or [])
     incomplete = (bool(sources.get("cover_urls")) and not cover_count) or (expected_fanart > int(task.get("fanart_count") or 0))
+    # 影片目录已被移走或删除时不再提供图片重试：重试会在旧路径上重新建目录，
+    # 把图片写回到用户已经清理过的地方。
+    save_dir = str(output.get("save_dir") or "").strip()
+    folder_missing = bool(save_dir) and not Path(save_dir).is_dir()
     return {"cover_count": cover_count, "image_retry_available": bool(
-        incomplete and output.get("fanart_file") and not task.get("image_retry_running"))}
+        incomplete and output.get("fanart_file") and not task.get("image_retry_running") and not folder_missing)}
 
 
 def _task_progress(task: dict, lines: list[str]) -> dict:
@@ -434,7 +572,7 @@ def _task_progress(task: dict, lines: list[str]) -> dict:
         }
     output = task.get("image_output")
     if isinstance(output, dict) and output.get("fanart_file"):
-        progress["output"] = {key: str(output.get(key) or "") for key in {"save_dir", "fanart_file", "poster_file"}}
+        progress["output"] = {key: str(output.get(key) or "") for key in {"save_dir", "fanart_file", "poster_file", "stills_dir"}}
     progress["output"] = _resolved_image_output(task, progress.get("output") or {})
     override = task.get("metadata_override")
     if isinstance(override, dict):
@@ -458,7 +596,7 @@ def _capture_task_artwork_event(task: dict, line: str) -> bool:
         }
         return True
     if event.get("stage") == "output":
-        task["image_output"] = {key: str(event.get(key) or "") for key in {"save_dir", "fanart_file", "poster_file"}}
+        task["image_output"] = {key: str(event.get(key) or "") for key in {"save_dir", "fanart_file", "poster_file", "stills_dir"}}
         return True
     if event.get("stage") == "file_organizer":
         task["file_organizer"] = {
@@ -562,34 +700,130 @@ def _cover_paths(input_path: str, output: dict | None = None) -> list[Path]:
     return sorted(found, key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)[:12]
 
 
-def _fanart_paths(input_path: str, output: dict | None = None) -> list[Path]:
-    target = Path(input_path)
-    root_value = str((output or {}).get("save_dir") or "").strip()
-    configured_root = Path(root_value) if root_value else None
-    if configured_root and configured_root.is_dir():
-        root = configured_root
-        recursive = False
-    elif target.is_dir():
-        root = target
-        recursive = True
-    else:
-        root = target.parent
-        recursive = False
-    found: list[Path] = []
+_STILLS_DIR_SUFFIX = "extrafanart"
+_MAX_STILLS_DIR_DEPTH = 6
+
+
+def _is_stills_dir_name(name: str) -> bool:
+    """剧照文件夹名为「可配置前缀 + extrafanart」；旧版本固定为 extrafanart。"""
+    return name.casefold().endswith(_STILLS_DIR_SUFFIX)
+
+
+def _stills_dir_root(input_path: str, output: dict | None = None) -> tuple[Path | None, bool]:
+    """Return the directory to search and whether descendants are included."""
+    output = output or {}
+    root_value = str(output.get("save_dir") or "").strip()
+    verified_root = Path(root_value) if root_value else None
+    if verified_root is not None and verified_root.is_dir():
+        return verified_root, False
+    target_value = str(input_path or "").strip()
+    if not target_value:
+        return None, False
+    target = Path(target_value)
+    if target.is_dir():
+        return target, True
+    return target.parent, False
+
+
+def _stills_dirs(input_path: str, output: dict | None = None) -> list[Path]:
+    """Locate stills folders.
+
+    The engine-reported ``stills_dir`` wins; otherwise folders whose name ends with
+    ``extrafanart`` are matched so that libraries scraped before the prefix option
+    existed keep working.
+    """
+    output = output or {}
+    directories: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        try:
+            key = str(path.resolve()).casefold()
+        except OSError:
+            key = str(path).casefold()
+        if key in seen:
+            return
+        try:
+            is_directory = path.is_dir()
+        except OSError:
+            return
+        if not is_directory:
+            return
+        seen.add(key)
+        directories.append(path)
+
+    reported = str(output.get("stills_dir") or "").strip()
+    if reported:
+        add(Path(reported))
+    root, recursive = _stills_dir_root(input_path, output)
+    if root is None:
+        return directories
     try:
-        candidates = root.rglob("*") if recursive else root.glob("extrafanart/*")
-        for item in candidates:
-            if item.is_file() and item.suffix.lower() in _IMAGE_EXTENSIONS and item.parent.name.lower() == "extrafanart" and len(item.relative_to(root).parts) <= 6:
-                found.append(item)
-            if len(found) >= 48:
-                break
+        candidates = [item for item in (root.rglob("*") if recursive else root.iterdir())
+                      if item.is_dir() and _is_stills_dir_name(item.name)]
     except OSError:
-        return []
-    return sorted(found, key=lambda item: item.name.lower())
+        return directories
+    for item in candidates:
+        try:
+            if recursive and len(item.relative_to(root).parts) > _MAX_STILLS_DIR_DEPTH:
+                continue
+        except ValueError:
+            continue
+        add(item)
+    return directories
+
+
+def _stills_target(output: dict | None = None) -> Path | None:
+    """Folder that retried stills should be written to."""
+    output = output or {}
+    reported = str(output.get("stills_dir") or "").strip()
+    if reported:
+        return Path(reported)
+    save_dir = str(output.get("save_dir") or "").strip()
+    return Path(save_dir) / _STILLS_DIR_SUFFIX if save_dir else None
+
+
+def _stills_sort_key(path: Path) -> tuple:
+    """Order stills numerically: ``0.png``, ``1.png``, …, ``10.png``.
+
+    Plain name ordering puts ``10.png`` between ``1.png`` and ``2.png``, which scrambled
+    the gallery order for movies with more than ten stills.
+    """
+    stem = path.stem.casefold()
+    match = re.search(r"(\d+)$", stem)
+    prefix = stem[:match.start()] if match else stem
+    number = int(match.group(1)) if match else -1
+    return (str(path.parent).casefold(), prefix, number, stem)
+
+
+def _fanart_paths(input_path: str, output: dict | None = None) -> list[Path]:
+    found: list[Path] = []
+    for directory in _stills_dirs(input_path, output):
+        try:
+            found.extend(item for item in directory.iterdir()
+                         if item.is_file() and item.suffix.lower() in _IMAGE_EXTENSIONS)
+        except OSError:
+            continue
+    found.sort(key=_stills_sort_key)
+    return found[:_MAX_STILLS_DIR_COUNT]
+
+
+def _mark_task_deleted(task_id: str) -> None:
+    """记住已删除的任务 ID。
+
+    图片重试、封面搜索等后台线程仍持有任务对象，收尾时的持久化会把记录写回来。
+    这里只保留最近删除的若干 ID（后台收尾是秒级行为，无需长期记忆）。
+    """
+    if len(_deleted_tasks) >= _MAX_DELETED_TASK_IDS:
+        _deleted_tasks.clear()
+    _deleted_tasks.add(task_id)
 
 
 def _persist(task: dict) -> None:
     with _lock:
+        if str(task.get("id") or "") in _deleted_tasks:
+            # 任务已被删除：后台线程不得让它复活（否则列表里会冒出删不掉的僵尸记录）
+            return
         task.pop("list_summary", None)
         task["updated_at"] = now_iso()
         upsert_task(task)
@@ -752,18 +986,45 @@ def _metadata_folder(task: dict) -> Path:
     return target if target.is_dir() else target.parent
 
 
-def _metadata_nfo_path(task: dict) -> Path:
+def _nfo_candidates(task: dict) -> list[Path]:
+    """NFO files that may describe this task, engine output first."""
     organizer = task.get("file_organizer") if isinstance(task.get("file_organizer"), dict) else {}
-    for value in organizer.get("generated_files") or []:
-        candidate = Path(str(value))
-        if candidate.suffix.lower() == ".nfo":
-            return candidate
+    candidates = [Path(str(value)) for value in organizer.get("generated_files") or []
+                  if str(value).lower().endswith(".nfo")]
     folder = _metadata_folder(task)
     try:
-        existing = sorted(folder.glob("*.nfo"), key=lambda item: item.name.lower())
+        candidates.extend(sorted(folder.glob("*.nfo"), key=lambda item: item.name.lower()))
     except OSError:
-        existing = []
-    return existing[0] if existing else folder / "movie.nfo"
+        pass
+    return list(dict.fromkeys(candidates))
+
+
+def _is_movie_nfo(path: Path) -> bool:
+    """True for an existing NFO that parses and describes a movie."""
+    try:
+        return ET.parse(path).getroot().tag == "movie"
+    except (OSError, ET.ParseError):
+        return False
+
+
+def _metadata_nfo_paths(task: dict) -> list[Path]:
+    """NFO files to rewrite: every existing movie NFO, or one new file.
+
+    Editing metadata used to rewrite only the first NFO found, so a folder holding both
+    ``{name}.nfo`` and ``movie.nfo`` kept a stale copy for whichever one the media server
+    reads. Files that cannot be parsed as a movie NFO are never overwritten.
+    """
+    candidates = _nfo_candidates(task)
+    usable = [path for path in candidates if path.is_file() and _is_movie_nfo(path)]
+    if usable:
+        return usable
+    for path in candidates:
+        if not path.exists():
+            return [path]
+    fallback = _metadata_folder(task) / "movie.nfo"
+    if not fallback.exists():
+        return [fallback]
+    raise ValueError("目录中已有的 NFO 无法解析为影片资料，未写入以免覆盖原有内容")
 
 
 def _replace_nfo_text(root: ET.Element, tag: str, value: str) -> None:
@@ -778,39 +1039,39 @@ def _replace_nfo_text(root: ET.Element, tag: str, value: str) -> None:
             root.remove(match)
 
 
-def _write_metadata_nfo(task: dict, metadata: dict[str, object]) -> Path:
-    nfo_path = _metadata_nfo_path(task)
-    nfo_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        tree = ET.parse(nfo_path)
-        root = tree.getroot()
-        if root.tag != "movie":
-            raise ValueError("NFO 根节点不是 movie")
-    except (OSError, ET.ParseError, ValueError):
-        root = ET.Element("movie")
-        tree = ET.ElementTree(root)
+def _write_metadata_nfo(task: dict, metadata: dict[str, object]) -> list[Path]:
+    written: list[Path] = []
+    for nfo_path in _metadata_nfo_paths(task):
+        nfo_path.parent.mkdir(parents=True, exist_ok=True)
+        if nfo_path.is_file():
+            tree = ET.parse(nfo_path)
+            root = tree.getroot()
+        else:
+            root = ET.Element("movie")
+            tree = ET.ElementTree(root)
 
-    _replace_nfo_text(root, "title", str(metadata.get("title") or ""))
-    _replace_nfo_text(root, "director", str(metadata.get("director") or ""))
-    _replace_nfo_text(root, "studio", str(metadata.get("producer") or ""))
-    _replace_nfo_text(root, "publisher", str(metadata.get("publisher") or ""))
-    _replace_nfo_text(root, "premiered", str(metadata.get("publish_date") or ""))
-    for item in list(root.findall("uniqueid")):
-        if item.get("type") == "num":
+        _replace_nfo_text(root, "title", str(metadata.get("title") or ""))
+        _replace_nfo_text(root, "director", str(metadata.get("director") or ""))
+        _replace_nfo_text(root, "studio", str(metadata.get("producer") or ""))
+        _replace_nfo_text(root, "publisher", str(metadata.get("publisher") or ""))
+        _replace_nfo_text(root, "premiered", str(metadata.get("publish_date") or ""))
+        for item in list(root.findall("uniqueid")):
+            if item.get("type") == "num":
+                root.remove(item)
+        dvdid = str(metadata.get("dvdid") or "")
+        if dvdid:
+            ET.SubElement(root, "uniqueid", {"type": "num", "default": "true"}).text = dvdid
+        for item in list(root.findall("actor")):
             root.remove(item)
-    dvdid = str(metadata.get("dvdid") or "")
-    if dvdid:
-        ET.SubElement(root, "uniqueid", {"type": "num", "default": "true"}).text = dvdid
-    for item in list(root.findall("actor")):
-        root.remove(item)
-    for actress in metadata.get("actress") or []:
-        actor = ET.SubElement(root, "actor")
-        ET.SubElement(actor, "name").text = str(actress)
-    ET.indent(tree, space="  ")
-    temporary = nfo_path.with_suffix(nfo_path.suffix + ".tmp")
-    tree.write(temporary, encoding="utf-8", xml_declaration=True)
-    temporary.replace(nfo_path)
-    return nfo_path
+        for actress in metadata.get("actress") or []:
+            actor = ET.SubElement(root, "actor")
+            ET.SubElement(actor, "name").text = str(actress)
+        ET.indent(tree, space="  ")
+        temporary = nfo_path.with_suffix(nfo_path.suffix + ".tmp")
+        tree.write(temporary, encoding="utf-8", xml_declaration=True)
+        temporary.replace(nfo_path)
+        written.append(nfo_path)
+    return written
 
 
 def update_task_metadata(task_id: str, values: dict[str, object], apply_to_folder: bool = False) -> dict | None:
@@ -826,12 +1087,14 @@ def update_task_metadata(task_id: str, values: dict[str, object], apply_to_folde
             else:
                 metadata[key] = str(value or "").strip()
         task["metadata_override"] = metadata
-        nfo_path = _write_metadata_nfo(task, metadata) if apply_to_folder else None
+        nfo_paths = _write_metadata_nfo(task, metadata) if apply_to_folder else []
         logs = _logs.setdefault(task_id, list(task.get("log_tail") or []))
-        logs.append("已手动更新影片资料" + (f"并同步 NFO：{nfo_path}" if nfo_path else ""))
+        detail = "；".join(str(path) for path in nfo_paths)
+        logs.append("已手动更新影片资料" + (f"并同步 NFO：{detail}" if detail else ""))
         task["log_tail"] = _clean_log_lines(logs)[-_MAX_LOG_LINES:]
         _persist(task)
-        return {"metadata": metadata, "nfo_path": str(nfo_path) if nfo_path else ""}
+        return {"metadata": metadata, "nfo_path": str(nfo_paths[0]) if nfo_paths else "",
+                "nfo_paths": [str(path) for path in nfo_paths]}
 
 
 def _restore_plan(task: dict) -> dict | None:
@@ -872,16 +1135,21 @@ def restore_task_files(task_id: str) -> bool:
             else:
                 for organized in plan["organized_files"]:
                     organized.unlink()
-            output_root = Path((task.get("image_output") or {}).get("save_dir") or "")
+            image_output = task.get("image_output") if isinstance(task.get("image_output"), dict) else {}
+            output_root_value = str(image_output.get("save_dir") or "").strip()
+            output_root = Path(output_root_value) if output_root_value else None
             removable = [path for path in plan["generated_files"] if path.is_file()]
-            if output_root.is_dir():
-                removable.extend(path for path in _fanart_paths("", {"save_dir": str(output_root)}) if path.is_file())
+            if output_root is not None and output_root.is_dir():
+                removable.extend(path for path in _fanart_paths("", image_output) if path.is_file())
             for path in dict.fromkeys(removable):
                 path.unlink(missing_ok=True)
-            fanart_dir = output_root / "extrafanart"
-            if fanart_dir.is_dir() and not any(fanart_dir.iterdir()):
-                fanart_dir.rmdir()
-            if output_root.is_dir() and not any(output_root.iterdir()):
+            for stills_dir in _stills_dirs("", image_output):
+                try:
+                    if not any(stills_dir.iterdir()):
+                        stills_dir.rmdir()
+                except OSError:
+                    continue
+            if output_root is not None and output_root.is_dir() and not any(output_root.iterdir()):
                 output_root.rmdir()
             task["restored_at"] = now_iso()
             _logs.setdefault(task_id, list(task.get("log_tail") or [])).append("已还原原始影片文件并移除本次刮削生成文件")
@@ -1057,12 +1325,15 @@ def _prepare_tasks(
     from javsp.config import Cfg
     scanner = Cfg.model_validate(config_data).scanner
     only_match_media_types = scanner.only_match_media_types
+    extensions = _video_extensions(scanner)
     try:
         concurrency = max(1, min(32, int(preset.get("task_concurrency", 1))))
     except (TypeError, ValueError):
         concurrency = 1
     batch_id = batch_id or uuid.uuid4().hex[:12]
     if input_files is None and input_path.is_file():
+        if input_path.suffix.lower() not in extensions:
+            raise ValueError(f"该文件的扩展名不在预设的视频文件扩展名列表中: {input_path.suffix or '(无扩展名)'}")
         if only_match_media_types and configured_media_type(str(input_path), scanner) is None:
             raise ValueError("文件名未匹配任何影片分类规则，已跳过扫描")
         if not _passes_minimum_size(input_path, minimum_size, config_data):
@@ -1072,12 +1343,18 @@ def _prepare_tasks(
     if input_files is None and not input_path.is_dir():
         raise ValueError("输入路径不是目录或文件")
     video_files = []
+    skipped = 0
     try:
+        directory_filter = None if input_files is not None else _DirectoryFilter(input_path, scanner)
         candidates = (Path(os.path.abspath(os.path.expanduser(p.strip()))) for p in input_files) if input_files is not None else input_path.rglob("*")
         for item in candidates:
             progress(len(video_files), f"正在扫描，已发现 {len(video_files)} 个视频文件")
             # Check suffix first to avoid a remote stat for every non-video.
-            if item.suffix.lower() in _VIDEO_EXTENSIONS and item.is_file():
+            if item.suffix.lower() in extensions and item.is_file():
+                if directory_filter is not None and directory_filter.prunes(item):
+                    skipped = directory_filter.skipped_files
+                    progress(len(video_files), f"已跳过 {skipped} 个文件（所在目录已有 NFO 或匹配忽略目录规则）")
+                    continue
                 if only_match_media_types and configured_media_type(str(item), scanner) is None:
                     continue
                 video_files.append(item)
@@ -1087,6 +1364,8 @@ def _prepare_tasks(
     except OSError as exc:
         raise ValueError(f"无法读取输入目录: {exc}") from exc
     if not video_files:
+        if skipped:
+            raise NoScrapeTasksError(f"输入目录中的 {skipped} 个影片都被跳过了：所在目录已有 NFO 或匹配忽略目录规则")
         raise NoScrapeTasksError("输入目录中未找到符合预设最小匹配文件大小的影片文件")
     # Some mounted filesystems can expose the same file through more than one
     # directory entry. A duplicate task races against its own output directory.
@@ -1218,9 +1497,11 @@ def _run_task(task: dict) -> None:
         elif code == 0:
             _logs.setdefault(task["id"], []).append("JavSP 执行完成")
         else:
-            no_result = any("个抓取器均未获取到影片信息" in line for line in _logs.get(task["id"], []))
-            reason = _process_failure_reason(_logs.get(task["id"], []))
-            task["error"] = "抓取器均未获取到影片信息" if no_result else (reason or f"JavSP 执行失败（退出码: {code}）")
+            raw_logs = _logs.get(task["id"], [])
+            no_result = any("个抓取器均未获取到影片信息" in line for line in raw_logs)
+            reason = _process_failure_reason(raw_logs)
+            summary = _crawler_failure_summary(raw_logs) if no_result else ""
+            task["error"] = _failure_error_text(no_result=no_result, summary=summary, reason=reason, code=code)
             _logs.setdefault(task["id"], []).append(task["error"])
     except Exception as exc:  # noqa: BLE001
         if process is not None and process.poll() is None:
@@ -1771,8 +2052,11 @@ def _search_google_cover(task: dict) -> None:
                 _logs[task_id].append(f"封面搜索已同步 CookieCloud：{summary['domains']} 个站点，{summary['cookies']} 条 Cookie")
             except (CookieCloudError, OSError, ValueError) as exc:
                 _logs[task_id].append(f"封面搜索 CookieCloud 同步失败，继续使用其他凭据：{exc}")
+        config_path = str(task.get("config_path") or "").strip()
+        if not config_path:
+            raise ValueError("该任务没有生成刮削配置（扫描任务没有），无法搜索封面")
         completed = subprocess.run(
-            [sys.executable, "-c", _COVER_CRAWLER_SCRIPT, "-c", str(task["config_path"]), query],
+            [sys.executable, "-c", _COVER_CRAWLER_SCRIPT, "-c", config_path, query],
             cwd=str(VENDOR_DIR), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180,
         )
         output = completed.stdout.decode("utf-8", errors="replace")
@@ -1794,7 +2078,7 @@ def _search_google_cover(task: dict) -> None:
         task["google_cover_search_running"] = False
         _persist(task)
         return
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - 后台线程必须收敛状态，不能把界面留在“搜索中”
         _logs.setdefault(task_id, list(task.get("log_tail") or [])).append(f"爬虫搜索封面失败：{exc}")
         task["log_tail"] = _clean_log_lines(_logs[task_id])[-_MAX_LOG_LINES:]
         task["google_cover_search_status"] = "failed"
@@ -1805,6 +2089,10 @@ def _search_google_cover(task: dict) -> None:
                 cookiecloud_file.unlink(missing_ok=True)
             except OSError:
                 pass
+        if task.get("google_cover_search_status") in {"queued", "running"}:
+            # 未走到成功或失败分支（例如被取消）时也要结束状态，避免一直显示“搜索中”
+            task["google_cover_search_status"] = "failed"
+            task["google_cover_search_error"] = task.get("google_cover_search_error") or "封面搜索未完成，请重试"
         task["google_cover_search_running"] = False
         _persist(task)
 
@@ -1888,12 +2176,94 @@ def google_cover_thumbnail(task_id: str, candidate_id: str) -> tuple[bytes, str]
     return content, media_type if media_type.startswith("image/") else "image/jpeg"
 
 
-def _rebuild_retry_poster(fanart_file: Path, poster_file: Path) -> None:
+def _retry_cover_settings(task: dict) -> dict:
+    """封面裁剪设置取自该任务的预设快照；读不到时按引擎默认值处理。"""
+    config_path = str(task.get("config_path") or "").strip()
+    if not config_path:
+        return {}
+    try:
+        config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    cover = ((config or {}).get("summarizer") or {}).get("cover") if isinstance(config, dict) else None
+    return cover if isinstance(cover, dict) else {}
+
+
+def _retry_input_file(task: dict) -> str:
+    files = task.get("input_files") or []
+    return str(files[0]) if files else str(task.get("input_directory") or "")
+
+
+def _retry_needs_engine_crop(task: dict, crop: dict) -> bool:
+    """与引擎一致：只有无码、FC2 或番号命中 on_id_pattern 时才用图像识别裁剪。"""
+    dvdid = str(((task.get("progress") or {}).get("metadata") or {}).get("dvdid") or task.get("name") or "")
+    for pattern in crop.get("on_id_pattern") or []:
+        try:
+            if re.match(str(pattern), dvdid):
+                return True
+        except re.error:
+            continue
+    video = _retry_input_file(task)
+    if "FC2" in Path(video).stem.upper():
+        return True
+    try:
+        vendor = str(VENDOR_DIR)
+        if vendor not in sys.path:
+            sys.path.insert(0, vendor)
+        from javsp.lib import detect_special_attr
+        return "U" in detect_special_attr(video, dvdid)
+    except Exception:  # noqa: BLE001 - 判断失败时退回默认裁剪更安全
+        return False
+
+
+def _engine_cropper(engine):
+    """借用引擎的裁剪器，保证重试产出的封面与正常刮削一致。"""
+    vendor = str(VENDOR_DIR)
+    if vendor not in sys.path:
+        sys.path.insert(0, vendor)
+    from javsp.config import SlimefaceEngine
+    from javsp.cropper import get_cropper
+    if isinstance(engine, dict):
+        # 预设快照里是普通字典，引擎的工厂函数要求模型对象
+        engine = SlimefaceEngine(**engine) if engine.get("name") == "slimeface" else None
+    return get_cropper(engine)
+
+
+def _add_retry_labels(task: dict, poster: Image.Image) -> Image.Image:
+    """按引擎的方式补上「字幕 / 无码」水印标签（标记图缺失时跳过）。"""
+    video = _retry_input_file(task)
+    dvdid = str(((task.get("progress") or {}).get("metadata") or {}).get("dvdid") or task.get("name") or "")
+    try:
+        vendor = str(VENDOR_DIR)
+        if vendor not in sys.path:
+            sys.path.insert(0, vendor)
+        from javsp.image import LabelPostion, add_label_to_poster
+        from javsp.lib import detect_special_attr, resource_path
+        attributes = detect_special_attr(video, dvdid)
+        if "C" in attributes:
+            poster = add_label_to_poster(poster, Image.open(resource_path("image/sub_mark.png")), LabelPostion.BOTTOM_RIGHT)
+        if "U" in attributes:
+            poster = add_label_to_poster(poster, Image.open(resource_path("image/unc_mark.png")), LabelPostion.BOTTOM_LEFT)
+    except Exception:  # noqa: BLE001 - 水印属于装饰，失败不应让重试整体失败
+        return poster
+    return poster
+
+
+def _rebuild_retry_poster(task: dict, fanart_file: Path, poster_file: Path) -> None:
+    """按引擎的方式重建海报：默认 1:1.42 从右侧裁切，配置了识别裁剪且命中时改用它。
+
+    重试以前用「居中裁切 + 2:3」，与正常刮削产出的海报在位置和比例上都不同。
+    """
+    cover = _retry_cover_settings(task)
+    crop = cover.get("crop") if isinstance(cover.get("crop"), dict) else {}
+    engine = crop.get("engine") if isinstance(crop.get("engine"), dict) else None
+    if engine is not None and not _retry_needs_engine_crop(task, crop):
+        engine = None
     with Image.open(fanart_file) as source:
         image = ImageOps.exif_transpose(source).convert("RGB")
-        target_width = min(image.width, max(1, round(image.height * 2 / 3)))
-        left = max(0, (image.width - target_width) // 2)
-        poster = image.crop((left, 0, left + target_width, image.height))
+        poster = _engine_cropper(engine).crop(image)
+        if cover.get("add_label"):
+            poster = _add_retry_labels(task, poster)
         poster_file.parent.mkdir(parents=True, exist_ok=True)
         poster.save(poster_file)
 
@@ -1916,7 +2286,7 @@ def _retry_task_images(task: dict, progress: dict) -> None:
             for url in cover_urls:
                 try:
                     _download_retry_image(url, fanart_file)
-                    _rebuild_retry_poster(fanart_file, poster_file)
+                    _rebuild_retry_poster(task, fanart_file, poster_file)
                     cover_downloaded = True
                     _append_task_event(task, "images", kind="cover", done=1, total=1, status="completed")
                     break
@@ -1926,7 +2296,9 @@ def _retry_task_images(task: dict, progress: dict) -> None:
                 errors.extend(cover_errors or ["封面：未能下载有效封面"])
                 _append_task_event(task, "images", kind="cover", done=0, total=1, status="failed", error=cover_errors[-1] if cover_errors else "未能下载有效封面")
 
-        fanart_dir = save_dir / "extrafanart"
+        # 剧照写入引擎上报的目录；旧任务记录没有该字段时沿用 extrafanart。
+        # 目录由 _download_retry_image 按需创建，封面重试不会留下空文件夹。
+        fanart_dir = _stills_target({**output, "save_dir": str(save_dir)}) or (save_dir / _STILLS_DIR_SUFFIX)
         fanart_done = 0
         for index, url in enumerate(preview_pics):
             _append_task_event(task, "images", kind="fanart", done=fanart_done, total=len(preview_pics), status="downloading", current=index + 1)
@@ -1962,6 +2334,10 @@ def retry_task_images(task_id: str) -> bool:
         has_image_source = bool(sources.get("cover_urls") or sources.get("preview_pics"))
         if not (has_image_source and output.get("fanart_file")):
             return False
+        # 目录已被移走时拒绝重试，否则会在旧路径上重新创建目录并写回图片。
+        save_dir = str(output.get("save_dir") or "").strip()
+        if save_dir and not Path(save_dir).is_dir():
+            return False
         task["image_retry_running"] = True
         task["image_retry_started_at"] = now_iso()
         _logs[task_id] = raw_logs
@@ -1987,6 +2363,19 @@ def cancel_task(task_id: str) -> bool:
         _persist(task)
         _queue_condition.notify_all()
         return True
+
+
+def cancel_tasks(task_ids: set[str] | None = None) -> int:
+    """停止排队中与运行中的任务（task_ids 为空表示全部），返回实际停止的数量。
+
+    批量停止只在这里汇总一次任务列表，避免界面对几百个任务逐个发请求。
+    """
+    with _lock:
+        candidates = [str(item.get("id") or "") for item in load_tasks()
+                      if item.get("status") in {"queued", "running"}]
+    if task_ids is not None:
+        candidates = [task_id for task_id in candidates if task_id in task_ids]
+    return sum(1 for task_id in candidates if cancel_task(task_id))
 
 
 def recover_interrupted_tasks() -> int:
@@ -2042,8 +2431,8 @@ def delete_task(task_id: str) -> bool:
         task = get_task_record(task_id)
         if not task or task.get("status") == "running":
             return False
-        if task.get("status") == "queued":
-            _deleted_tasks.add(task_id)
+        # 排队中的任务不再启动；已完成/失败的任务也不允许后台线程再写回记录
+        _mark_task_deleted(task_id)
         delete_task_record(task_id)
         _logs.pop(task_id, None)
         config_path = task.get("config_path")
@@ -2052,6 +2441,15 @@ def delete_task(task_id: str) -> bool:
                 path = Path(config_path).resolve()
                 folder = (DATA_DIR / "task-config").resolve()
                 if path.parent == folder:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        # 引擎的原始诊断日志（含轮转文件）随任务一起删除；任务记录里保存的可读日志仍在。
+        log_folder = (DATA_DIR / "task-logs").resolve()
+        for name in (f"{task_id}.log", f"{task_id}.log.1"):
+            try:
+                path = (log_folder / name).resolve()
+                if path.parent == log_folder:
                     path.unlink(missing_ok=True)
             except OSError:
                 pass

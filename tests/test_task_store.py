@@ -28,6 +28,7 @@ class TaskStoreTests(unittest.TestCase):
         self.enterContext(patch.object(tasks, 'DATA_DIR', self.folder))
         self.enterContext(patch.object(tasks, '_TASK_COVERS_DIR', self.folder / 'task-covers'))
         self.enterContext(patch.object(tasks, '_logs', {}))
+        self.enterContext(patch.object(tasks, '_deleted_tasks', set()))
         self.enterContext(patch.object(artwork, 'DATA_DIR', self.folder))
 
     def item(self, task_id='one', status='succeeded', **kw):
@@ -182,6 +183,163 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(tasks.get_task('one')['title'], 'Updated')
             load.assert_called_once_with({'one'})
         self.assertEqual(tasks.get_task('two')['title'], 'two')
+
+    def test_metadata_edit_updates_every_movie_nfo_in_the_folder(self):
+        """A folder holding both {name}.nfo and movie.nfo must not keep a stale copy."""
+        folder = self.folder / 'media' / 'ABC-123'
+        folder.mkdir(parents=True)
+        (folder / 'ABC-123.mp4').write_bytes(b'x' * 20)
+        for name in ('ABC-123.nfo', 'movie.nfo'):
+            (folder / name).write_text('<?xml version="1.0" encoding="utf-8"?>\n<movie><title>Old</title></movie>', encoding='utf-8')
+        record = self.item('one', image_output={'save_dir': str(folder)})
+        storage.save_tasks([record])
+        result = tasks.update_task_metadata('one', {'title': 'New title', 'actress': ['Alice']}, True)
+        self.assertEqual(sorted(Path(path).name for path in result['nfo_paths']), ['ABC-123.nfo', 'movie.nfo'])
+        for name in ('ABC-123.nfo', 'movie.nfo'):
+            text = (folder / name).read_text(encoding='utf-8')
+            self.assertIn('New title', text)
+            self.assertIn('Alice', text)
+            self.assertNotIn('Old', text)
+
+    def test_metadata_edit_never_overwrites_an_unparsable_nfo(self):
+        folder = self.folder / 'media' / 'ABC-123'
+        folder.mkdir(parents=True)
+        (folder / 'ABC-123.mp4').write_bytes(b'x' * 20)
+        broken = folder / 'broken.nfo'
+        broken.write_bytes(b'<movie><title>not closed')
+        storage.save_tasks([self.item('one', image_output={'save_dir': str(folder)})])
+        result = tasks.update_task_metadata('one', {'title': 'New title'}, True)
+        self.assertEqual(broken.read_bytes(), b'<movie><title>not closed')
+        self.assertTrue(result['nfo_path'].endswith('movie.nfo'))
+        self.assertIn('New title', (folder / 'movie.nfo').read_text(encoding='utf-8'))
+
+    def test_metadata_edit_reports_when_no_nfo_can_be_safely_written(self):
+        folder = self.folder / 'media' / 'ABC-123'
+        folder.mkdir(parents=True)
+        (folder / 'ABC-123.mp4').write_bytes(b'x' * 20)
+        for name in ('broken.nfo', 'movie.nfo'):
+            (folder / name).write_bytes(b'<movie><title>not closed')
+        storage.save_tasks([self.item('one', image_output={'save_dir': str(folder)})])
+        with self.assertRaisesRegex(ValueError, '未写入以免覆盖'):
+            tasks.update_task_metadata('one', {'title': 'New title'}, True)
+        client = self.client()
+        response = client.patch('/api/tasks/one/metadata', json={'title': 'New title', 'apply_to_folder': True})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('写入 NFO 失败', response.json()['detail'])
+
+    def test_metadata_edit_without_a_file_only_stores_the_override(self):
+        record = self.item('one')
+        storage.save_tasks([record])
+        result = tasks.update_task_metadata('one', {'title': 'Only record'}, False)
+        self.assertEqual(result['nfo_paths'], [])
+        self.assertEqual(result['nfo_path'], '')
+        self.assertEqual(tasks.get_task('one')['title'], 'Only record')
+
+    def test_image_retry_is_not_offered_after_the_folder_moved_away(self):
+        """Retrying a stale record would recreate the old folder and write images there."""
+        gone = self.folder / 'moved-away' / 'ABC-123'
+        output = {'save_dir': str(gone), 'fanart_file': str(gone / 'fanart.jpg'), 'poster_file': str(gone / 'poster.jpg')}
+        record = self.item('one', status='failed', image_output=output,
+                           image_sources={'cover_urls': ['https://example.test/cover'], 'preview_pics': []})
+        storage.save_tasks([record])
+        self.assertFalse(tasks._artwork_availability(record, output)['image_retry_available'])
+        self.assertFalse(tasks.retry_task_images('one'))
+        self.assertFalse(tasks.get_task('one').get('image_retry_running'))
+
+        gone.mkdir(parents=True)
+        self.assertTrue(tasks._artwork_availability(record, output)['image_retry_available'])
+
+    def test_image_retry_still_works_while_the_folder_exists(self):
+        folder = self.folder / 'media' / 'ABC-123'
+        folder.mkdir(parents=True)
+        output = {'save_dir': str(folder), 'fanart_file': str(folder / 'fanart.jpg')}
+        record = self.item('one', status='failed', image_output=output,
+                           image_sources={'cover_urls': ['https://example.test/cover'], 'preview_pics': []})
+        self.assertTrue(tasks._artwork_availability(record, output)['image_retry_available'])
+
+    def test_deleting_a_task_removes_its_config_and_diagnostic_log(self):
+        configs = self.folder / 'task-config'
+        configs.mkdir(parents=True, exist_ok=True)
+        config = configs / 'one.yml'
+        config.write_text('scanner: {}', encoding='utf-8')
+        logs = self.folder / 'task-logs'
+        logs.mkdir(parents=True, exist_ok=True)
+        for name in ('one.log', 'one.log.1'):
+            (logs / name).write_text('raw engine log', encoding='utf-8')
+        storage.save_tasks([self.item('one', config_path=str(config))])
+        self.assertTrue(tasks.delete_task('one'))
+        self.assertFalse(config.exists())
+        self.assertFalse((logs / 'one.log').exists())
+        self.assertFalse((logs / 'one.log.1').exists())
+
+    def test_deleting_a_task_never_touches_files_outside_the_data_folders(self):
+        outside = self.folder / 'outside.log'
+        outside.write_text('keep', encoding='utf-8')
+        storage.save_tasks([self.item('one', config_path=str(outside))])
+        self.assertTrue(tasks.delete_task('one'))
+        self.assertEqual(outside.read_text(encoding='utf-8'), 'keep')
+
+    def test_search_matches_text_literally_without_wildcards(self):
+        """搜索用 instr() 做子串匹配：% 和 _ 必须按字面处理，不能当成通配符。"""
+        records = []
+        for task_id, name in (('pct', 'ABC%DEF'), ('underscore', 'ABC_DEF'), ('plain', 'ABCDEF')):
+            record = self.item(task_id)
+            record['input_directory'] = f'X:/lib/{name}.mp4'
+            records.append(record)
+        storage.save_tasks(records)
+        for query, expected in (('ABC%DEF', {'pct'}), ('ABC_DEF', {'underscore'}), ('%', {'pct'}),
+                                ('_', {'underscore'}), ('ABCDEF', {'plain'}), ('abc_def', {'underscore'})):
+            with self.subTest(query=query):
+                result = tasks.list_task_summaries(50, 0, view='all', query=query)
+                self.assertEqual({item['id'] for item in result['items']}, expected)
+
+    def test_status_filter_totals_match_the_returned_items(self):
+        storage.save_tasks([self.item('a', status='succeeded'), self.item('b', status='failed'),
+                            self.item('c', status='failed'), self.item('d', status='queued')])
+        for status, expected in (('', 4), ('failed', 2), ('queued', 1), ('cancelled', 0)):
+            with self.subTest(status=status):
+                result = tasks.list_task_summaries(50, 0, view='all', status=status)
+                self.assertEqual(result['total'], expected)
+                self.assertEqual(len(result['items']), expected)
+                if status:
+                    self.assertTrue(all(item['status'] == status for item in result['items']))
+
+    def test_paging_survives_out_of_range_offset_and_unparsable_dates(self):
+        storage.save_tasks([self.item(str(index)) for index in range(5)])
+        # 超出范围的 offset 会被夹到最后一页，避免翻页后拿到空表
+        result = tasks.list_task_summaries(2, 10 ** 6, view='all')
+        self.assertEqual((result['total'], [item['id'] for item in result['items']]), (5, ['4']))
+        # 界面使用 type=date 控件；这里只需保证非法日期不会抛异常（julianday 得到 NULL → 不过滤出任何记录）
+        self.assertEqual(tasks.list_task_summaries(50, 0, view='all', date_from='2026-13-45')['total'], 0)
+        self.assertEqual(tasks.list_task_summaries(50, 0, view='all', date_from='2026-01-01T00:00:00Z')['total'], 5)
+
+    def test_deleted_task_is_not_resurrected_by_a_background_finish(self):
+        """图片重试/封面搜索的收尾持久化不得把已删除的任务写回列表。"""
+        storage.save_tasks([self.item('one', status='succeeded', image_retry_started_at='2026-09-24T00:00:00+00:00')])
+        self.assertTrue(tasks.delete_task('one'))
+        tasks._persist({'id': 'one', 'status': 'succeeded', 'image_retry_running': False})
+        tasks._persist({'id': 'one', 'status': 'succeeded', 'google_cover_search_status': 'failed'})
+        self.assertEqual(storage.load_tasks(), [])
+        self.assertIsNone(storage.get_task_record('one'))
+
+    def test_other_tasks_still_persist_after_a_delete(self):
+        storage.save_tasks([self.item('one'), self.item('two')])
+        self.assertTrue(tasks.delete_task('one'))
+        record = storage.get_task_record('two')
+        record['title'] = 'updated title'
+        tasks._persist(record)
+        self.assertEqual(storage.get_task_record('two')['title'], 'updated title')
+
+    def test_cover_search_of_a_task_without_config_fails_instead_of_hanging(self):
+        record = self.item('scan-task', status='succeeded', task_type='scan', config_path=None,
+                           progress={'metadata': {'dvdid': 'SNOS-094'}})
+        storage.save_tasks([record])
+        tasks._search_google_cover(dict(record))
+        stored = storage.get_task_record('scan-task')
+        self.assertEqual(stored['google_cover_search_status'], 'failed')
+        self.assertFalse(stored['google_cover_search_running'])
+        self.assertTrue(stored['google_cover_search_error'])
+        self.assertIn('没有生成刮削配置', ' '.join(stored.get('log_tail') or []))
 
     def test_library_search_filters_before_pagination_without_losing_group_members(self):
         records = [self.item(str(i), image_sources={'cover_urls': ['https://example.test/cover']}) for i in range(30)]

@@ -15,6 +15,14 @@ def _connection_error(*_: object, **__: object) -> QbittorrentError:
     return QbittorrentError("无法连接 qBittorrent，请检查服务地址后重试")
 
 
+def _numeric(value: object, fallback: float) -> float:
+    """qBittorrent 的逐条限制可能是数字或缺失，统一按数字读取。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def _base_url(settings: dict) -> str:
     value = str(settings.get("url") or "").strip().rstrip("/")
     parsed = urlparse(value)
@@ -110,6 +118,10 @@ def list_downloads(settings: dict) -> list[dict]:
             "ratio": float(item.get("ratio", 0) or 0),
             "seeding_time": int(item.get("seeding_time", 0) or 0),
             "inactive_seeding_time": int(item.get("inactive_seeding_time", 0) or 0),
+            # 逐条做种限制：-2 沿用全局、-1 不限制、>=0 为阈值（qBittorrent 的约定）
+            "ratio_limit": _numeric(item.get("ratio_limit"), -2.0),
+            "seeding_time_limit": _numeric(item.get("seeding_time_limit"), -2.0),
+            "inactive_seeding_time_limit": _numeric(item.get("inactive_seeding_time_limit"), -2.0),
             "tags": item.get("tags", ""),
             "category": item.get("category", ""),
             "content_path": item.get("content_path") or item.get("save_path") or "",

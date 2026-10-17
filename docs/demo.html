@@ -7,14 +7,14 @@
   <link rel="icon" type="image/x-icon" href="/favicon.ico?v=2">
   <title>交互示例 | JavSP WEB</title>
   <style>html[data-initial-view] [data-panel]{display:none}.view.active{display:block}html[data-initial-view="overview"] [data-panel="overview"],html[data-initial-view="scrape"] [data-panel="scrape"],html[data-initial-view="auto-scrape"] [data-panel="auto-scrape"],html[data-initial-view="downloads"] [data-panel="downloads"],html[data-initial-view="crawler-config"] [data-panel="crawler-config"],html[data-initial-view="presets"] [data-panel="presets"],html[data-initial-view="settings"] [data-panel="settings"]{display:block}</style>
-    <link rel="stylesheet" href="assets/app.css?v=08412e9dd28f">
-  <link rel="stylesheet" href="assets/overrides.css?v=08412e9dd28f">
-  <link rel="stylesheet" href="assets/cinema.css?v=08412e9dd28f">
-<link rel="stylesheet" href="demo.css?v=08412e9dd28f">
+    <link rel="stylesheet" href="assets/app.css?v=ed705f60a9c9">
+  <link rel="stylesheet" href="assets/overrides.css?v=ed705f60a9c9">
+  <link rel="stylesheet" href="assets/cinema.css?v=ed705f60a9c9">
+<link rel="stylesheet" href="demo.css?v=ed705f60a9c9">
 </head>
 <body class="demo-mode">
-<script src="demo-seed.js?v=08412e9dd28f"></script>
-<script src="demo-mock.js?v=08412e9dd28f"></script>
+<script src="demo-seed.js?v=ed705f60a9c9"></script>
+<script src="demo-mock.js?v=ed705f60a9c9"></script>
   <script>(function(){try{var v=localStorage.getItem('javsp-web.active-view');if(v)document.documentElement.dataset.initialView=v;if(localStorage.getItem('javsp-web.privacy-mode')==='1')document.documentElement.dataset.privacyMode='1';}catch(e){}})();</script>
   <div class="app-shell">
     <aside class="sidebar">
@@ -33,7 +33,7 @@
       </nav>
       <div class="sidebar-footer"><span class="status-dot"></span>服务已连接</div>
     </aside>
-    <main class="main"><aside class="demo-notice" role="note"><strong>交互示例 · demo.08412e9dd28f</strong><span>使用当前程序界面与模拟数据，不连接模型、不访问影片文件。更改仅保留到刷新；请勿填写真实密钥。</span><a href="docs.html">使用教程 ↗</a></aside>
+    <main class="main"><aside class="demo-notice" role="note"><strong>交互示例 · demo.ed705f60a9c9</strong><span>使用当前程序界面与模拟数据，不连接模型、不访问影片文件。更改仅保留到刷新；请勿填写真实密钥。</span><a href="docs.html">使用教程 ↗</a></aside>
       <header class="topbar"><div><p class="eyebrow" id="section-eyebrow">工作区</p><h1 id="section-title">概览</h1></div><div class="account"><span id="app-version" class="app-version" data-update-status="checking" title="正在检查更新">读取版本…</span><button class="account-profile" type="button" data-open-profile title="个人中心" aria-label="打开个人中心"><span id="current-avatar"></span><span id="current-user"></span></button><button class="icon-button" id="logout" title="退出登录">退出</button></div></header>
 
       <section class="view active" data-panel="overview">
@@ -79,7 +79,7 @@
       </section>
 
       <section class="view" data-panel="downloads">
-        <div class="panel narrow"><div class="download-policy-header"><div><h2>接管与做种策略</h2><p class="muted">为符合下方条件的下载任务设置限速和做种规则。限速按每个任务分别计算。</p></div><button id="download-policy-toggle" class="button secondary" type="button" aria-expanded="false">展开策略</button></div><div id="download-policy-content" class="hidden"><form id="download-management-form" class="stack"><section class="download-policy-section"><h3>接管条件</h3><label class="check-label"><input id="download-takeover-enabled" type="checkbox">启用下载任务接管</label><div class="download-takeover-fields"><label>接管标签<input id="download-takeover-tags" placeholder="多个标签用逗号分隔；留空则接管全部标签"></label><label>接管分类<input id="download-takeover-category" placeholder="留空则接管全部分类"></label></div></section><section class="download-policy-section"><h3>限速与做种</h3><div class="global-seeding-fields"><label>下载限速 (KiB/s)<input id="download-download-limit" type="number" min="-1" step="1" value="-1"><small>-1 表示不限速</small></label><label>上传限速 (KiB/s)<input id="download-upload-limit" type="number" min="-1" step="1" value="-1"><small>-1 表示不限速</small></label><label>分享率上限<input id="download-ratio-limit" type="number" min="-1" step="0.1" value="-1"><small>-1 表示不限制分享率</small></label><label>做种分钟<input id="download-seeding-time-limit" type="number" min="-1" step="1" value="-1"><small>-1 表示不限制时间</small></label><label>非活跃分钟<input id="download-inactive-seeding-time-limit" type="number" min="-1" step="1" value="-1"><small>-1 表示不限制时间</small></label></div></section><section class="download-policy-section"><h3>完成动作</h3><label class="check-label"><input id="download-auto-remove" type="checkbox">达到限制后自动删种（保留文件）</label></section><div class="form-actions"><button class="button primary" type="submit">保存全局策略</button><span id="download-management-message" class="muted"></span></div></form></div></div>
+        <div class="panel narrow"><div class="download-policy-header"><div><h2>接管与做种策略</h2><p class="muted">为符合下方条件的下载任务设置限速和做种规则。限速按每个任务分别计算。</p></div><button id="download-policy-toggle" class="button secondary" type="button" aria-expanded="false">展开策略</button></div><div id="download-policy-content" class="hidden"><form id="download-management-form" class="stack"><section class="download-policy-section"><h3>接管条件</h3><label class="check-label"><input id="download-takeover-enabled" type="checkbox">启用下载任务接管</label><div class="download-takeover-fields"><label>接管标签<input id="download-takeover-tags" placeholder="多个标签用逗号分隔；留空则接管全部标签"></label><label>接管分类<input id="download-takeover-category" placeholder="留空则接管全部分类"></label></div></section><section class="download-policy-section"><h3>限速与做种</h3><div class="global-seeding-fields"><label>下载限速 (KiB/s)<input id="download-download-limit" type="number" min="-1" step="1" value="-1"><small>-1 表示不限速</small></label><label>上传限速 (KiB/s)<input id="download-upload-limit" type="number" min="-1" step="1" value="-1"><small>-1 表示不限速</small></label><label>分享率上限<input id="download-ratio-limit" type="number" min="-2" step="0.1" value="-2"><small>-2 沿用全局；-1 不限制；其余为阈值</small></label><label>做种分钟<input id="download-seeding-time-limit" type="number" min="-2" step="1" value="-2"><small>-2 沿用全局；-1 不限制；其余为分钟数</small></label><label>非活跃分钟<input id="download-inactive-seeding-time-limit" type="number" min="-2" step="1" value="-2"><small>-2 沿用全局；-1 不限制；其余为分钟数</small></label></div></section><section class="download-policy-section"><h3>完成动作</h3><label class="check-label"><input id="download-auto-remove" type="checkbox">达到限制后自动删种（保留文件）</label></section><div class="form-actions"><button class="button primary" type="submit">保存全局策略</button><span id="download-management-message" class="muted"></span></div></form></div></div>
         <div class="panel"><div class="panel-heading"><div><h2>下载管理</h2><p class="muted">选择下载器查看任务。已接管的任务会按上方设置限速、做种。</p></div><button class="button secondary" id="refresh-downloads">刷新</button></div><div id="downloader-tabs" class="downloader-tabs" role="tablist"></div><div id="download-summary" class="download-summary" aria-live="polite"></div><div id="download-filter-bar" class="download-filter-bar" aria-label="下载任务筛选"><input id="download-filter-name" type="search" placeholder="搜索名称"><select id="download-filter-category"><option value="">全部分类</option></select><select id="download-filter-tags"><option value="">全部标签</option></select><button id="download-filter-reset" class="button secondary" type="button">重置</button></div><p id="download-filter-summary" class="muted"></p><div id="download-list" class="download-list empty">正在读取下载列表</div></div>
       </section>
 
@@ -128,9 +128,9 @@
       <button id="update-overlay-close" class="button secondary" type="button" hidden>关闭提示</button>
     </div>
   </div>
-  <script src="assets/community.js?v=08412e9dd28f"></script>
-  <script src="assets/demo-app.js?v=08412e9dd28f"></script>
-  <script src="assets/ai-markdown.js?v=08412e9dd28f"></script>
-  <script src="assets/ai.js?v=08412e9dd28f"></script>
+  <script src="assets/community.js?v=ed705f60a9c9"></script>
+  <script src="assets/demo-app.js?v=ed705f60a9c9"></script>
+  <script src="assets/ai-markdown.js?v=ed705f60a9c9"></script>
+  <script src="assets/ai.js?v=ed705f60a9c9"></script>
 </body>
 </html>

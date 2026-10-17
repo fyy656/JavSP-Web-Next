@@ -37,7 +37,7 @@ const FORM_TABS = [
   { id: 'other', section: 'other', label: '其他', description: 'JavSP 命令行选项。' },
 ];
 const NAMING_RULE_VARIABLES = [
-  ['num', '番号'], ['title', '标题'], ['rawtitle', '原始标题'], ['actress', '女优'], ['score', '评分'],
+  ['num', '番号'], ['title', '标题'], ['rawtitle', '原始标题'], ['filename', '原始文件名'], ['actress', '女优'], ['score', '评分'],
   ['censor', '码状态'], ['serial', '系列'], ['director', '导演'], ['producer', '制作商'], ['publisher', '发行商'],
   ['date', '发行日期'], ['year', '发行年份'], ['label', '番号前缀'], ['genre', '类型'],
 ];
@@ -48,7 +48,7 @@ const FIELD_LABELS = {
   'scanner.ignored_id_pattern': '番号识别忽略规则', 'scanner.input_directory': '扫描目录', 'scanner.filename_extensions': '影片文件扩展名', 'scanner.ignored_folder_name_pattern': '忽略目录规则', 'scanner.minimum_size': '最小匹配文件大小', 'scanner.only_match_media_types': '仅扫描匹配影片分类', 'scanner.skip_nfo_dir': '跳过已有 NFO 的目录', 'scanner.manual': '手动确认扫描结果',
   'network.proxy_server': '代理服务器地址', 'network.proxy_free': '网站备用地址', 'network.proxy_free.avsox': 'Avsox 免代理地址', 'network.proxy_free.javbus': 'JavBus 免代理地址', 'network.proxy_free.javdb': 'JavDB 免代理地址', 'network.proxy_free.javlib': 'JavLib 免代理地址', 'network.retry': '网络重试次数', 'network.timeout': '网络请求超时',
   'crawler.selection.normal': '普通影片爬虫列表', 'crawler.selection.fc2': 'FC2 影片爬虫列表', 'crawler.selection.cid': 'CID 影片爬虫列表', 'crawler.selection.getchu': 'Getchu 影片爬虫列表', 'crawler.selection.gyutto': 'Gyutto 影片爬虫列表', 'crawler.required_keys': '必须取得的资料', 'crawler.hardworking': '深度抓取', 'crawler.respect_site_avid': '使用网站返回的番号', 'crawler.fc2fan_local_path': 'FC2Fan 本地镜像目录', 'crawler.sleep_after_scraping': '每部影片刮削后等待时间', 'crawler.use_javdb_cover': 'JavDB 封面优先级', 'crawler.normalize_actress_name': '统一女优艺名',
-  'summarizer.move_files': '移动文件到整理目录', 'summarizer.path.output_folder_pattern': '整理输出目录模板', 'summarizer.path.basename_pattern': '影片文件名', 'summarizer.path.length_maximum': '最大文件路径长度', 'summarizer.path.length_by_byte': '按字节计算路径长度', 'summarizer.path.max_actress_count': '路径中最多包含的女优数', 'summarizer.path.hard_link': '使用硬链接整理文件', 'summarizer.title.remove_trailing_actor_name': '移除标题末尾女优名', 'summarizer.default.title': '标题为空时显示', 'summarizer.default.actress': '演员为空时显示', 'summarizer.default.series': '系列为空时显示', 'summarizer.default.director': '导演为空时显示', 'summarizer.default.producer': '制作商为空时显示', 'summarizer.default.publisher': '发行商为空时显示', 'summarizer.nfo.basename_pattern': 'NFO 文件名', 'summarizer.nfo.title_pattern': 'NFO 影片标题模板', 'summarizer.nfo.custom_genres_fields': '自定义分类字段', 'summarizer.nfo.custom_tags_fields': '自定义标签字段', 'summarizer.censor_options_representation': '有码 / 无码显示文字', 'summarizer.cover.basename_pattern': '封面文件名', 'summarizer.cover.highres': '优先下载高清封面', 'summarizer.cover.add_label': '在封面添加水印标签', 'summarizer.cover.crop.on_id_pattern': '启用封面裁剪的番号规则', 'summarizer.cover.crop.engine': '封面裁剪识别引擎', 'summarizer.fanart.basename_pattern': '横版封面文件名', 'summarizer.extra_fanarts.enabled': '下载剧照', 'summarizer.extra_fanarts.scrap_interval': '剧照请求间隔',
+  'summarizer.move_files': '移动文件到整理目录', 'summarizer.path.output_folder_pattern': '整理输出目录模板', 'summarizer.path.basename_pattern': '影片文件名', 'summarizer.path.length_maximum': '最大文件路径长度', 'summarizer.path.length_by_byte': '按字节计算路径长度', 'summarizer.path.max_actress_count': '路径中最多包含的女优数', 'summarizer.path.hard_link': '使用硬链接整理文件', 'summarizer.title.remove_trailing_actor_name': '移除标题末尾女优名', 'summarizer.default.title': '标题为空时显示', 'summarizer.default.actress': '演员为空时显示', 'summarizer.default.series': '系列为空时显示', 'summarizer.default.director': '导演为空时显示', 'summarizer.default.producer': '制作商为空时显示', 'summarizer.default.publisher': '发行商为空时显示', 'summarizer.nfo.basename_pattern': 'NFO 文件名', 'summarizer.nfo.title_pattern': 'NFO 影片标题模板', 'summarizer.nfo.custom_genres_fields': '自定义分类字段', 'summarizer.nfo.custom_tags_fields': '自定义标签字段', 'summarizer.censor_options_representation': '有码 / 无码显示文字', 'summarizer.cover.basename_pattern': '封面文件名', 'summarizer.cover.highres': '优先下载高清封面', 'summarizer.cover.add_label': '在封面添加水印标签', 'summarizer.cover.crop.on_id_pattern': '启用封面裁剪的番号规则', 'summarizer.cover.crop.engine': '封面裁剪识别引擎', 'summarizer.fanart.basename_pattern': '横版封面文件名', 'summarizer.extra_fanarts.enabled': '下载剧照', 'summarizer.extra_fanarts.folder_prefix': '剧照文件夹名前缀', 'summarizer.extra_fanarts.scrap_interval': '剧照请求间隔',
   'translator.engine': '翻译引擎', 'translator.fields.title': '翻译标题', 'translator.fields.plot': '翻译剧情简介', 'translator.engine.name': '翻译引擎名称', 'translator.engine.app_id': '翻译服务应用 ID', 'translator.engine.api_key': '翻译服务 API 密钥', 'translator.engine.url': 'OpenAI 兼容接口地址', 'translator.engine.model': '翻译模型名称',
   'other.interactive': '终端交互模式', 'other.check_update': '检查 JavSP 更新', 'other.auto_update': '自动下载新版本',
   ignored_id_pattern: '忽略番号规则', input_directory: '输入目录', filename_extensions: '文件扩展名', ignored_folder_name_pattern: '忽略目录规则', minimum_size: '最小文件大小', skip_nfo_dir: '跳过 NFO 目录', manual: '手动确认',
@@ -93,7 +93,7 @@ const FIELD_DESCRIPTIONS = {
   'scanner.ignored_folder_name_pattern': '跳过名称符合规则的文件夹。',
   'scanner.minimum_size': '小于此大小的视频会被跳过。请带上单位，例如 200MB 或 1GB。',
   'network.proxy_server': '支持 HTTP、SOCKS5 和 SOCKS5H 代理。',
-  'network.proxy_free': '网站打不开时，可在这里更换地址。',
+  'network.proxy_free': '仅在未配置代理时生效的站点地址：JavBus、JavDB 在配置了代理后会改用官网，这里的地址就失效；Avsox 始终使用这里的地址。未配置代理时请填写可直连的镜像站，填官网地址会被反爬拦截（表现为“反爬空响应”）。',
   'network.retry': '网络问题导致抓取失败时的重试次数。',
   'network.timeout': '单次请求最多等待多久，例如 PT10S 表示 10 秒，PT1M 表示 1 分钟。',
   'crawler.selection': '同一项资料有多个来源时，优先使用排在前面的来源。',
@@ -123,6 +123,7 @@ const FIELD_DESCRIPTIONS = {
   'summarizer.cover.crop.engine': '填写识别服务配置；留空不使用图像识别。',
   'summarizer.fanart.basename_pattern': '横版封面文件名，不包含扩展名，可使用标题等变量。',
   'summarizer.extra_fanarts.enabled': '',
+  'summarizer.extra_fanarts.folder_prefix': '剧照文件夹是「前缀 + extrafanart」，例如填 {num}- 会得到 ABC-123-extrafanart；留空即 extrafanart。可使用与文件名相同的变量。',
   'summarizer.extra_fanarts.scrap_interval': '两次剧照抓取请求之间的等待时长。',
   'translator.engine': '',
   'other.interactive': '在命令行运行 JavSP 时，是否等待键盘输入确认。网页任务无需开启。',
@@ -324,6 +325,7 @@ function isNamingRulePath(path) {
     'summarizer.path.output_folder_pattern', 'summarizer.path.basename_pattern',
     'summarizer.nfo.basename_pattern', 'summarizer.nfo.title_pattern',
     'summarizer.cover.basename_pattern', 'summarizer.fanart.basename_pattern',
+    'summarizer.extra_fanarts.folder_prefix',
   ].includes(path);
 }
 
@@ -778,16 +780,6 @@ function taskLogMarkup(task, key = task.id, className = 'task-raw-log') {
   return `<details class="${className}" data-task-details="${escapeHtml(key)}"><summary>任务日志${sourceSummary}</summary><div class="task-log-wrap task-log-readable"><div class="log-toolbar"><span>进度自动更新 · 相同事件合并显示</span><button class="copy-log" type="button" data-copy-task="${escapeHtml(key)}">复制摘要</button></div><div class="task-log log-sections" data-task-log="${escapeHtml(key)}" data-copy-text="${escapeHtml(text)}">${content}</div></div></details>`;
 }
 
-function taskCard(task) {
-  const labels = { queued: '排队中', running: '运行中', succeeded: '已完成', failed: '失败', cancelled: '已取消' };
-  const lines = (task.log_tail || []).join('\n');
-  const taskName = task.name || String(task.input_directory || '').split(/[\\/]/).pop();
-  const log = lines ? `<div class="task-log-wrap"><pre class="task-log" data-task-log="${escapeHtml(task.id)}">${escapeHtml(lines)}</pre><button class="copy-log" type="button" data-copy-task="${escapeHtml(task.id)}">复制日志</button></div>` : '';
-  const active = ['queued', 'running'].includes(task.status);
-  const actions = `<div class="form-actions task-actions">${task.status === 'running' ? `<button class="button secondary" onclick="cancelTask('${escapeHtml(task.id)}')">停止任务</button>` : ''}<button class="button secondary task-delete" data-delete-task="${escapeHtml(task.id)}"${active ? ' disabled title="请先停止任务"' : ''}>删除</button></div>`;
-  return `<article class="task-card"><div class="task-card-head"><div class="task-card-title"><strong>${escapeHtml(taskName)}</strong><div class="task-meta"><span>预设：${escapeHtml(task.preset_name || task.preset_id || '默认配置')}</span><span>时间：${new Date(task.created_at).toLocaleString()}</span></div></div><span class="badge ${task.status}">${labels[task.status] || task.status}</span></div><div class="task-path">路径：${escapeHtml(task.input_directory)}</div>${task.error ? `<div class="form-error">${escapeHtml(task.error)}</div>` : ''}${log}${actions}</article>`;
-}
-
 function crawlerStatusClass(status) {
   const value = String(status || '');
   if (value.startsWith('重试')) return 'retrying';
@@ -822,16 +814,6 @@ function progressMarkup(task) {
   };
   const crawlerUnits = Object.entries(progress.crawlers || {}).map(([name, status]) => `<span class="crawler-unit"><b>${escapeHtml(name)}</b><em>${escapeHtml(status)}</em></span>`).join('');
   return `<div class="scrape-progress">${stage('concurrent', '并发任务')}${crawlerUnits ? `<div class="crawler-units">${crawlerUnits}</div>` : ''}${stage('summary', '汇总数据')}${stage('images', '下载图片')}</div>`;
-}
-
-function taskCard(task) {
-  const labels = { queued: '排队中', running: '运行中', succeeded: '已完成', failed: '失败', cancelled: '已取消' };
-  const lines = (task.log_tail || []).join('\n');
-  const taskName = task.name || String(task.input_directory || '').split(/[\\/]/).pop();
-  const rawLog = taskLogMarkup(task);
-  const active = task.status === 'running';
-  const actions = `<div class="form-actions task-actions">${active ? `<button class="button secondary" onclick="cancelTask('${escapeHtml(task.id)}')">停止任务</button>` : ''}<button class="button secondary task-delete" data-delete-task="${escapeHtml(task.id)}"${active ? ' disabled title="请先停止任务"' : ''}>删除</button></div>`;
-  return `<article class="task-card"><div class="task-card-head"><div class="task-card-title"><strong>${escapeHtml(taskName)}</strong><div class="task-meta"><span>预设：${escapeHtml(task.preset_name || task.preset_id || '默认配置')}</span><span>时间：${new Date(task.created_at).toLocaleString()}</span></div></div><span class="badge ${task.status}">${labels[task.status] || task.status}</span></div><div class="task-path">路径：${escapeHtml(task.input_directory)}</div>${progressMarkup(task)}${task.error ? `<div class="form-error">${escapeHtml(task.error)}</div>` : ''}${rawLog}${actions}</article>`;
 }
 
 function progressMarkup(task) {
@@ -899,22 +881,6 @@ function hasTaskDetailLogSelection() {
   if (!selection || selection.isCollapsed || !selection.rangeCount || !content) return false;
   return content.contains(selection.anchorNode) && content.contains(selection.focusNode);
 }
-
-function renderTasks() {
-  rememberLogScroll();
-  $('#task-table').innerHTML = state.tasks.length ? state.tasks.map(taskCard).join('') : '<div class="task-list empty">还没有任务记录</div>';
-  window.requestAnimationFrame(restoreLogScroll);
-}
-
-
-function overviewTaskCard(task) {
-  const failed = task.status === 'failed' || task.status === 'cancelled';
-  const count = failed ? 6 : Math.min(task.cover_count || 0, 12);
-  const covers = count ? Array.from({ length: count }, (_, index) => failed ? '<span class="cover-tile cover-failed">失败</span>' : `<img class="cover-tile" src="/api/tasks/${encodeURIComponent(task.id)}/cover/${index}" loading="lazy" alt="">`).join('') : '<span class="cover-empty">暂无封面</span>';
-  return `<article class="overview-task-card"><div class="overview-task-head"><div><strong>${escapeHtml(task.name || task.id)}</strong><div class="task-meta"><span>${escapeHtml(task.preset_name || '默认配置')}</span><span>${new Date(task.created_at).toLocaleString()}</span></div></div><span class="badge ${task.status}">${task.status === 'succeeded' ? '已完成' : (failed ? '失败' : (task.status === 'running' ? '运行中' : '排队中'))}</span></div><div class="cover-wall ${failed ? 'failure' : ''}">${covers}</div></article>`;
-}
-
-
 
 function taskPageRequest() {
   const view = document.querySelector('.view.active')?.dataset.panel;
@@ -1315,8 +1281,28 @@ function cancelTask(id) {
   });
 }
 
-function deleteTask(id) {
-  deleteTaskInDialog(id);
+function stopTasks(ids = [], label = '') {
+  const targets = [...new Set(ids)].filter(Boolean);
+  const many = label || (targets.length ? `选中的 ${targets.length} 个任务` : '所有排队中与运行中的任务');
+  confirmAction({
+    title: '停止任务',
+    text: `确定停止${many}吗？正在运行的任务会立即中止，排队中的任务不会再开始；记录会保留为“已取消”。`,
+    confirmLabel: '停止任务',
+    danger: true,
+    run: async () => {
+      // 批量停止几百个任务需要几秒，先给个进行中的提示
+      const message = $('#action-confirm-message');
+      if (message) message.textContent = '正在停止任务…';
+      const result = await api('/api/tasks/cancel', { method: 'POST', body: JSON.stringify({ ids: targets }) });
+      targets.forEach((id) => state.selectedOverviewTasks.delete(id));
+      await loadTasks();
+      showToast(`已停止 ${result.cancelled || 0} 个任务`);
+    },
+  });
+}
+
+function stopAllTasks() {
+  stopTasks([], '所有排队中与运行中的任务');
 }
 
 async function deleteTaskInDialog(id) {
@@ -1696,6 +1682,15 @@ document.addEventListener('change', (event) => {
   }
 });
 document.addEventListener('click', async (event) => {
+  if (event.target.closest('#task-stop-all') || event.target.closest('#overview-stop-all')) {
+    stopAllTasks();
+    return;
+  }
+  const stopSelected = event.target.closest('#overview-cancel-selected');
+  if (stopSelected && !stopSelected.disabled && state.selectedOverviewTasks.size) {
+    stopTasks([...state.selectedOverviewTasks]);
+    return;
+  }
   const button = event.target.closest('#overview-delete-selected');
   if (!button || button.disabled || !state.selectedOverviewTasks.size) return;
   const ids = [...state.selectedOverviewTasks];
@@ -1908,9 +1903,16 @@ function syncTaskExpansion(tasks) {
 function scanTaskCard(task) {
   const id = escapeHtml(task.id);
   const active = ['queued', 'running'].includes(task.status);
+  const stop = taskStopButton(task);
   const labels = { queued: '等待扫描', running: '扫描中', succeeded: '扫描完成', failed: '扫描失败', cancelled: '扫描已取消' };
-  const stop = active ? "<button class=\"button secondary task-stop\" type=\"button\" onclick=\"cancelTask('" + id + "')\">停止扫描</button>" : '';
   return '<article class="task-card" data-task-card="' + id + '"><div class="task-card-head"><div class="task-card-title"><strong>' + escapeHtml(taskDisplayName(task)) + '</strong><div class="task-path">路径：' + escapeHtml(task.input_directory) + '</div><p role="status">' + escapeHtml(task.scan?.message || '等待扫描') + '</p><p class="muted">发现 ' + Number(task.scan?.discovered_files || 0) + ' 个文件 · 创建 ' + Number(task.scan?.created_tasks || 0) + ' 个影片任务</p></div><div class="task-card-tools"><span class="badge ' + escapeHtml(task.status) + '">' + (labels[task.status] || '') + '</span><button class="icon-button" type="button" data-task-detail="' + id + '">详情</button>' + stop + '<button class="task-delete" type="button" data-delete-task="' + id + '"' + (active ? ' disabled' : '') + '>删除</button></div></div></article>';
+}
+
+function taskStopButton(task) {
+  // 排队中也要能停止：任务详情对话框与定时任务运行记录此前只在“运行中”时提供入口
+  if (!task || !['queued', 'running'].includes(task.status)) return '';
+  const label = task.task_type === 'scan' ? '停止扫描' : '停止任务';
+  return `<button class="button secondary task-stop" type="button" onclick="cancelTask('${escapeHtml(task.id)}')">${label}</button>`;
 }
 
 function taskCard(task) {
@@ -1922,7 +1924,7 @@ function taskCard(task) {
   const titleMeta = task.title ? `<span>文件：${escapeHtml(fileName)}</span>` : '';
   const actions = '';
   const detailButton = `<button class="icon-button" type="button" data-task-detail="${escapeHtml(task.id)}" title="查看任务详情">详情</button>`;
-  const stopButton = active ? `<button class="button secondary task-stop" type="button" onclick="cancelTask('${escapeHtml(task.id)}')">停止任务</button>` : '';
+  const stopButton = taskStopButton(task);
   const deleteButton = `<button class="task-delete" type="button" data-delete-task="${escapeHtml(task.id)}"${active ? ' disabled title="请先停止任务"' : ' title="删除任务"'}>删除</button>`;
   return `<article class="task-card task-card-collapsible" data-task-card="${escapeHtml(task.id)}"><div class="task-card-head"><div class="task-card-title"><strong>${escapeHtml(taskDisplayName(task))}</strong><div class="task-meta">${titleMeta}<span>预设：${escapeHtml(task.preset_name || task.preset_id || '默认配置')}</span><span>时间：${new Date(task.created_at).toLocaleString()}</span></div><div class="task-path">路径：${escapeHtml(task.input_directory)}</div><div class="task-image-summary">${escapeHtml(imageProgressSummary(task))}</div></div><div class="task-card-tools"><span class="badge ${task.status}">${labels[task.status] || task.status}</span>${detailButton}${stopButton}${deleteButton}<button class="task-toggle" type="button" data-task-toggle="${escapeHtml(task.id)}" aria-expanded="${expanded}" title="${expanded ? '收起任务' : '展开任务'}">${expandControlIcon(expanded)}</button></div></div><div class="task-card-body${expanded ? '' : ' hidden'}" data-task-body="${escapeHtml(task.id)}">${progressMarkup(task)}${task.error ? `<div class="form-error">${escapeHtml(task.error)}</div>` : ''}${actions}</div></article>`;
 }
@@ -1939,7 +1941,7 @@ function ensureTaskFilters() {
   if ($('#task-filter-bar')) return;
   const taskTable = $('#task-table');
   if (!taskTable) return;
-  taskTable.insertAdjacentHTML('beforebegin', `<div id="task-filter-bar" class="task-filter-bar" aria-label="任务筛选"><select id="task-filter-field"><option value="all">全部信息</option><option value="path">路径</option><option value="title">标题</option><option value="dvdid">番号</option><option value="actress">女优</option></select><input id="task-filter-query" type="search" placeholder="搜索路径、标题、番号或女优"><select id="task-filter-status"><option value="">全部状态</option><option value="queued">排队中</option><option value="running">运行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select><label>大小 MB<input id="task-filter-size-min" type="number" min="0" placeholder="最小"></label><span>至</span><label><input id="task-filter-size-max" type="number" min="0" placeholder="最大"></label><label>时间<input id="task-filter-date-from" type="date"></label><span>至</span><label><input id="task-filter-date-to" type="date"></label><button id="task-filter-reset" class="button secondary" type="button">重置</button></div><p id="task-filter-summary" class="muted"></p><div id="task-pagination" class="overview-pagination"></div>`);
+  taskTable.insertAdjacentHTML('beforebegin', `<div id="task-filter-bar" class="task-filter-bar" aria-label="任务筛选"><select id="task-filter-field"><option value="all">全部信息</option><option value="path">路径</option><option value="title">标题</option><option value="dvdid">番号</option><option value="actress">女优</option></select><input id="task-filter-query" type="search" placeholder="搜索路径、标题、番号或女优"><select id="task-filter-status"><option value="">全部状态</option><option value="queued">排队中</option><option value="running">运行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select><label>大小 MB<input id="task-filter-size-min" type="number" min="0" placeholder="最小"></label><span>至</span><label><input id="task-filter-size-max" type="number" min="0" placeholder="最大"></label><label>时间<input id="task-filter-date-from" type="date"></label><span>至</span><label><input id="task-filter-date-to" type="date"></label><button id="task-filter-reset" class="button secondary" type="button">重置</button><button id="task-stop-all" class="button secondary" type="button" title="停止所有排队中与运行中的任务">停止全部任务</button></div><p id="task-filter-summary" class="muted"></p><div id="task-pagination" class="overview-pagination"></div>`);
   $('#task-filter-field')?.remove();
   let filterTimer;
   document.querySelectorAll('#task-filter-bar input, #task-filter-bar select').forEach((control) => control.addEventListener('input', () => { clearTimeout(filterTimer); filterTimer = setTimeout(() => { state.taskPage = 0; loadTasks(); }, 200); }));
@@ -1987,10 +1989,12 @@ async function openTaskDetail(taskId, background = false) {
   } finally { if (detailRequestId === state.detailRequestId) state.detailLoading = false; }
   if (state.activeTaskDetail !== taskId || !dialog.open || detailRequestId !== state.detailRequestId || (background && (state.taskMetadataEditing || state.taskDetailLogSelecting || hasTaskDetailLogSelection()))) return;
   state.detailTask = task;
+  const stopControl = taskStopButton(task);
+  const stopRow = stopControl ? `<div class="form-actions task-actions">${stopControl}</div>` : '';
   document.querySelector('.film-navigation').hidden = task.task_type === 'scan';
   document.querySelector('[data-detail-section="task-comments"]').hidden = !task.progress?.metadata?.dvdid || !state.runtime?.comments_url;
   if (task.task_type === 'scan') {
-    $('#task-detail-content').innerHTML = '<p role="status">' + escapeHtml(task.scan?.message || '') + '</p><p class="muted">扫描完成后，影片任务会出现在任务队列中。停止扫描仅停止继续创建任务。</p><pre class="task-log">' + escapeHtml((task.log_tail || []).join('\n')) + '</pre>';
+    $('#task-detail-content').innerHTML = '<p role="status">' + escapeHtml(task.scan?.message || '') + '</p><p class="muted">扫描完成后，影片任务会出现在任务队列中。停止扫描仅停止继续创建任务。</p>' + stopRow + '<pre class="task-log">' + escapeHtml((task.log_tail || []).join('\n')) + '</pre>';
     return;
   }
   const metadata = task.progress?.metadata || {};
@@ -2022,7 +2026,7 @@ async function openTaskDetail(taskId, background = false) {
   $('#task-detail-title').textContent = metadata.dvdid || '影片详情';
   $('#task-detail-subtitle').textContent = ['影片详情', task.preset_name, metadata.publish_date].filter(Boolean).join(' · ');
   const identifier = String(metadata.dvdid || '').trim();
-  patchChildren($('#task-detail-content'), `${metadataEditor}<section id="film-stills" class="detail-fanarts"><div class="film-section-heading"><h3>影片剧照 <span>${task.fanart_count || 0}</span></h3></div><div class="detail-fanart-grid">${fanarts}</div></section><details class="film-files"><summary>文件与刮削记录</summary><dl class="film-file-data">${fileInfo}</dl><section class="detail-images"><div><h3>封面与剧照</h3>${imageCounts}</div><div class="detail-image-actions">${googleCover}${retry}${restore}</div></section>${taskLog}</details>`);
+  patchChildren($('#task-detail-content'), `${metadataEditor}${stopRow}<section id="film-stills" class="detail-fanarts"><div class="film-section-heading"><h3>影片剧照 <span>${task.fanart_count || 0}</span></h3></div><div class="detail-fanart-grid">${fanarts}</div></section><details class="film-files"><summary>文件与刮削记录</summary><dl class="film-file-data">${fileInfo}</dl><section class="detail-images"><div><h3>封面与剧照</h3>${imageCounts}</div><div class="detail-image-actions">${googleCover}${retry}${restore}</div></section>${taskLog}</details>`);
   window.JavspComments?.open(identifier, state.runtime?.comments_url || '');
 }
 
@@ -2148,7 +2152,7 @@ function renderOverview() {
   const totalPages = Math.max(1, Math.ceil(state.taskTotal / state.overviewPageSize));
   const pageIds = new Set(cards.flatMap((entry) => entry.taskIds));
   const allSelected = pageIds.size > 0 && [...pageIds].every((id) => state.selectedOverviewTasks.has(id));
-  const selectionTools = `<div class="overview-selection-tools"><button class="button secondary overview-selection-mode" type="button" data-overview-selection-mode aria-pressed="${state.overviewSelectionMode}">${state.overviewSelectionMode ? '退出选择' : '选择'}</button><button class="button secondary overview-selection-all" type="button" data-overview-select-all aria-pressed="${allSelected}" title="${allSelected ? '取消全选' : '全选'}">${overviewSelectionIcon(allSelected)}<span>${allSelected ? '取消全选' : '全选'}</span></button><button id="overview-delete-selected" class="icon-button overview-selection-delete" type="button" title="删除所选记录" aria-label="删除所选记录"${state.selectedOverviewTasks.size ? '' : ' disabled'}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13m-7 4v5m4-5v5"/></svg></button></div>`;
+  const selectionTools = `<div class="overview-selection-tools"><button class="button secondary overview-selection-mode" type="button" data-overview-selection-mode aria-pressed="${state.overviewSelectionMode}">${state.overviewSelectionMode ? '退出选择' : '选择'}</button><button class="button secondary overview-selection-all" type="button" data-overview-select-all aria-pressed="${allSelected}" title="${allSelected ? '取消全选' : '全选'}">${overviewSelectionIcon(allSelected)}<span>${allSelected ? '取消全选' : '全选'}</span></button><button id="overview-stop-all" class="button secondary" type="button" title="停止所有排队中与运行中的任务">停止全部</button><button id="overview-cancel-selected" class="button secondary" type="button" title="停止所选任务"${state.selectedOverviewTasks.size ? '' : ' disabled'}>停止所选</button><button id="overview-delete-selected" class="icon-button overview-selection-delete" type="button" title="删除所选记录" aria-label="删除所选记录"${state.selectedOverviewTasks.size ? '' : ' disabled'}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13m-7 4v5m4-5v5"/></svg></button></div>`;
   const toolbar = `<div class="overview-cover-toolbar">${selectionTools}<label>排序<select id="overview-sort-key"><option value="created_at"${state.overviewSort.key === 'created_at' ? ' selected' : ''}>刮削时间</option><option value="publish_date"${state.overviewSort.key === 'publish_date' ? ' selected' : ''}>发行时间</option></select></label><label>顺序<select id="overview-sort-direction"><option value="desc"${state.overviewSort.direction === 'desc' ? ' selected' : ''}>由近到远</option><option value="asc"${state.overviewSort.direction === 'asc' ? ' selected' : ''}>由远到近</option></select></label></div>`;
   const [, typeLabel, english] = group.key === '__all__' ? ['', '全部', 'ALL MOVIES'] : overviewGroupType(group.by);
   const header = `<header class="lc-group-head"><div class="lc-group-art">${libraryCover(group, english)}</div><div class="lc-group-info"><button class="lc-back" type="button" data-overview-back><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>返回${escapeHtml(overviewGroupType(group.by)[1])}分类</button><p class="lc-eyebrow">${escapeHtml(typeLabel)} · ${escapeHtml(english)}</p><h2>${escapeHtml(group.name)}</h2><p class="lc-group-count"><i></i>${state.taskTotal} 部影片${state.overviewQuery ? ` · 搜索“${escapeHtml(state.overviewQuery)}”` : ''}</p></div></header>`;
@@ -2525,9 +2529,9 @@ async function loadDownloadManagement() {
     $('#download-takeover-category').value = settings.takeover_category || '';
     $('#download-download-limit').value = settings.download_limit_kib ?? -1;
     $('#download-upload-limit').value = settings.upload_limit_kib ?? -1;
-    $('#download-ratio-limit').value = settings.ratio_limit ?? -1;
-    $('#download-seeding-time-limit').value = settings.seeding_time_limit ?? -1;
-    $('#download-inactive-seeding-time-limit').value = settings.inactive_seeding_time_limit ?? -1;
+    $('#download-ratio-limit').value = settings.ratio_limit ?? -2;
+    $('#download-seeding-time-limit').value = settings.seeding_time_limit ?? -2;
+    $('#download-inactive-seeding-time-limit').value = settings.inactive_seeding_time_limit ?? -2;
     $('#download-auto-remove').checked = Boolean(settings.auto_remove);
     state.autoScrapeRules = normalizeAutoScrapeRules(settings);
     renderAutoScrapeRules(state.autoScrapeRules);
@@ -2629,7 +2633,7 @@ function scheduleRunTaskMarkup(task) {
   const expanded = state.taskOpen?.[logKey] ?? task.status === 'running';
   const lines = (task.log_tail || []).join('\n');
   const log = taskLogMarkup(task, logKey);
-  const stopButton = task.status === 'running' ? `<button class="button secondary task-stop" type="button" onclick="cancelTask('${escapeHtml(task.id)}')">中止任务</button>` : '';
+  const stopButton = taskStopButton(task);
   return `<article class="task-card task-card-collapsible schedule-run-task" data-task-card="${escapeHtml(logKey)}"><div class="task-card-head"><div class="task-card-title"><strong>${escapeHtml(taskDisplayName(task))}</strong><div class="task-meta"><span>预设：${escapeHtml(task.preset_name || task.preset_id || '默认配置')}</span><span>时间：${new Date(task.created_at).toLocaleString()}</span></div><div class="task-path">路径：${escapeHtml(task.input_directory)}</div><div class="task-image-summary">${escapeHtml(imageProgressSummary(task))}</div></div><div class="task-card-tools"><span class="badge ${task.status}">${labels[task.status] || task.status}</span>${stopButton}<button class="task-toggle" type="button" data-task-toggle="${escapeHtml(logKey)}" aria-expanded="${expanded}" title="${expanded ? '收起任务' : '展开任务'}">${expandControlIcon(expanded)}</button></div></div><div class="task-card-body${expanded ? '' : ' hidden'}" data-task-body="${escapeHtml(logKey)}">${progressMarkup(task)}${task.error ? `<div class="form-error">${escapeHtml(task.error)}</div>` : ''}${log}</div></article>`;
 }
 

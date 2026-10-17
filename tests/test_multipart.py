@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from typing import Dict
 from unittest.mock import Mock, patch
 
 import yaml
@@ -16,8 +17,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'vendor/JavSP'))
 
 from javsp.config import Cfg
-from javsp.datatype import MovieInfo
-from javsp.file import scan_movies
+from javsp.datatype import Movie, MovieInfo
+from javsp.file import replace_illegal_chars, scan_movies
 from javsp.multipart import group_files, part_number
 from javsp_web import tasks
 
@@ -68,6 +69,31 @@ class MultipartTests(unittest.TestCase):
             group_files(paths, self.config.scanner)
         separate = self.files('other/FC2-4953812-2.mp4')
         self.assertEqual(len(group_files([paths[0], separate[0]], self.config.scanner)), 2)
+
+    def test_letter_part_markers_match_the_engine_scanner(self):
+        paths = self.files('FCDSS-027/FCDSS-027-B.MP4', 'FCDSS-027/FCDSS-027-A.MP4')
+        self.assertEqual([[path.name for path in group] for group in group_files(paths, self.config.scanner)],
+                         [['FCDSS-027-A.MP4', 'FCDSS-027-B.MP4']])
+        movies = scan_movies(str(self.root))
+        self.assertEqual(len(movies), 1)
+        self.assertEqual(movies[0].dvdid, 'FCDSS-027')
+        self.assertEqual([Path(path).name for path in movies[0].files], ['FCDSS-027-A.MP4', 'FCDSS-027-B.MP4'])
+
+    def test_letter_parts_with_quality_suffix(self):
+        paths = self.files('FCDSS-027/FCDSS-027-A 4K.MP4', 'FCDSS-027/FCDSS-027-B 4K.MP4')
+        self.assertEqual([[path.name for path in group] for group in group_files(paths, self.config.scanner)],
+                         [['FCDSS-027-A 4K.MP4', 'FCDSS-027-B 4K.MP4']])
+
+    def test_discontinuous_letter_parts_are_rejected(self):
+        paths = self.files('FCDSS-027/FCDSS-027-A.MP4', 'FCDSS-027/FCDSS-027-C.MP4')
+        with self.assertRaisesRegex(ValueError, '分 P 编号不明确或重复'):
+            group_files(paths, self.config.scanner)
+        self.assertEqual(scan_movies(str(self.root)), [])
+
+    def test_unrelated_same_identifier_files_are_still_rejected(self):
+        paths = self.files('FCDSS-027/FCDSS-027-A.MP4', 'FCDSS-027/FCDSS-027-花絮.MP4')
+        with self.assertRaisesRegex(ValueError, '分 P 编号不明确或重复'):
+            group_files(paths, self.config.scanner)
 
     def test_preset_identifier_rules_do_not_change_global_config(self):
         data = copy.deepcopy(self.data)
@@ -250,6 +276,145 @@ class MultipartTests(unittest.TestCase):
                 self.assertEqual(existing.read_bytes(), b'original image')
                 self.assertTrue(source.exists())
 
+    def stills_config(self, *, output_pattern=None, folder_pattern=None, base_pattern='{num}', move_files=False, **extra_fanarts):
+        """Build a preset for stills/naming tests.
+
+        ``move_files`` must stay false when ``generate_names`` is mocked (the stills folder is
+        then taken from ``movie.save_dir``); pass true when the real naming rules must run,
+        because the engine only applies ``output_folder_pattern`` when files are organized.
+        """
+        data = copy.deepcopy(self.data)
+        data['summarizer']['move_files'] = move_files
+        data['translator']['engine'] = None
+        data['summarizer']['extra_fanarts'].update({'enabled': True, **extra_fanarts})
+        pattern = folder_pattern or (str(output_pattern) if output_pattern else None)
+        if pattern:
+            data['summarizer']['path']['output_folder_pattern'] = pattern
+        if pattern or base_pattern != '{num}':
+            data['summarizer']['path']['basename_pattern'] = base_pattern
+        return Cfg.model_validate(data)
+
+    def stills_movie(self, source, output, *, extrafanart_dir=None):
+        movie = scan_movies(str(source))[0]
+        movie.save_dir, movie.basename = str(output), 'ABC-123'
+        movie.nfo_file = str(output / 'movie.nfo')
+        movie.fanart_file = str(output / 'fanart.jpg')
+        movie.poster_file = str(output / 'poster.jpg')
+        movie.extrafanart_dir = extrafanart_dir
+        movie.info = MovieInfo(movie.dvdid)
+        movie.info.title = 'Test'
+        movie.info.big_covers, movie.info.covers = [], []
+        movie.info.preview_pics = ['https://example.test/image.png']
+        return movie
+
+    def run_normal_mode(self, movie, config):
+        """Run the vendored RunNormalMode body with mocked naming, downloads and NFO writes."""
+        events = []
+        tree = ast.parse((ROOT / 'vendor/JavSP/javsp/__main__.py').read_text(encoding='utf-8'))
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'RunNormalMode')
+        namespace = dict(os=os, time=Mock(), Cfg=lambda: config, logger=logging.getLogger('multipart-test'),
+                         tqdm=lambda *args, **kwargs: args[0] if args else Mock(), progress_enabled=lambda: True,
+                         progress_event=lambda stage, **kwargs: events.append((stage, kwargs)),
+                         fallback_media_type_id=lambda: 'normal', parallel_crawler=lambda *args: [movie.info],
+                         info_summary=lambda *args: True, generate_names=lambda *args: None,
+                         download_cover=lambda *args, **kwargs: None, download=lambda *args: {},
+                         valid_pic=lambda *args: True, get_fmt_size=lambda *args: '1 B',
+                         get_pic_size=lambda *args: (1, 1), write_nfo=Mock())
+        exec(compile(ast.Module(body=[function], type_ignores=[]), 'RunNormalMode', 'exec'), namespace)
+        return namespace['RunNormalMode']([movie]), events
+
+    def naming_helpers(self, config):
+        """Extract the vendored naming helpers so file-name rules are tested directly."""
+        tree = ast.parse((ROOT / 'vendor/JavSP/javsp/__main__.py').read_text(encoding='utf-8'))
+        wanted = ('extra_fanart_dir', 'generate_names')
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+        namespace = dict(os=os, Cfg=lambda: config, logger=logging.getLogger('multipart-test'), Dict=Dict,
+                         split_by_punc=lambda value: [value], replace_illegal_chars=replace_illegal_chars,
+                         get_remaining_path_len=lambda path: 100, Movie=Movie, MovieInfo=MovieInfo)
+        exec(compile(ast.Module(body=functions, type_ignores=[]), 'stills-naming', 'exec'), namespace)
+        return namespace
+
+    def test_naming_templates_can_use_the_original_file_name(self):
+        output = self.root / 'organized'
+        config = self.stills_config(folder_pattern=str(output / '{filename}'), base_pattern='{filename}', move_files=True)
+        namespace = self.naming_helpers(config)
+        movie = self.stills_movie(self.files('hhd800.com@SSIS-247.mp4')[0], output)
+        namespace['generate_names'](movie)
+        self.assertEqual(Path(movie.save_dir), output / 'hhd800.com@SSIS-247')
+        self.assertEqual(movie.basename, 'hhd800.com@SSIS-247')
+
+    def test_stills_folder_name_follows_file_name_variables(self):
+        output = self.root / 'organized'
+        namespace = self.naming_helpers(self.stills_config(output_pattern=output, move_files=True, folder_prefix='{num}-'))
+        movie = self.stills_movie(self.files('ABC-123.mp4')[0], output)
+        namespace['generate_names'](movie)
+        self.assertEqual(Path(movie.extrafanart_dir), output / 'ABC-123-extrafanart')
+
+        default_prefix = self.stills_config().summarizer.extra_fanarts.folder_prefix
+        self.assertEqual(default_prefix, '')
+        self.assertEqual(namespace['extra_fanart_dir']('/out', default_prefix, {'num': 'ABC-123'}), os.path.join('/out', 'extrafanart'))
+
+    def test_stills_prefix_keeps_a_direct_child_folder(self):
+        namespace = self.naming_helpers(self.stills_config(folder_prefix='../{num}/'))
+        sanitized = namespace['extra_fanart_dir']('/out', '../{num}/', {'num': 'ABC-123'})
+        self.assertEqual(Path(sanitized).parent, Path('/out'))
+        self.assertTrue(Path(sanitized).name.endswith('extrafanart'))
+        self.assertNotIn('..', Path(sanitized).name)
+
+    def test_stills_are_written_into_the_configured_folder(self):
+        output = self.root / 'organized'
+        movie = self.stills_movie(self.files('ABC-123.mp4')[0], output, extrafanart_dir=str(output / 'ABC-123-extrafanart'))
+        returned, events = self.run_normal_mode(movie, self.stills_config(folder_prefix='{num}-'))
+        self.assertEqual(returned, [movie])
+        self.assertTrue((output / 'ABC-123-extrafanart').is_dir())
+        self.assertFalse((output / 'extrafanart').exists())
+        reported = [event.get('stills_dir') for stage, event in events if stage == 'output' and event.get('stills_dir')]
+        self.assertEqual([Path(value) for value in reported], [output / 'ABC-123-extrafanart'])
+
+    def test_stills_fall_back_to_the_legacy_folder(self):
+        output = self.root / 'organized'
+        movie = self.stills_movie(self.files('ABC-123.mp4')[0], output)
+        returned, _ = self.run_normal_mode(movie, self.stills_config())
+        self.assertEqual(returned, [movie])
+        self.assertTrue((output / 'extrafanart').is_dir())
+
+    def test_stills_are_ordered_numerically(self):
+        output = self.root / 'organized'
+        folder = output / 'extrafanart'
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in ('0.png', '1.png', '2.png', '10.png', '11.png'):
+            (folder / name).write_bytes(b'x' * 20)
+        self.assertEqual([path.name for path in tasks._fanart_paths('', {'save_dir': str(output)})],
+                         ['0.png', '1.png', '2.png', '10.png', '11.png'])
+
+    def test_numbered_stills_with_prefix_are_ordered_numerically(self):
+        output = self.root / 'organized'
+        folder = output / 'extrafanart'
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in ('fanart1.png', 'fanart10.png', 'fanart2.png'):
+            (folder / name).write_bytes(b'x' * 20)
+        self.assertEqual([path.name for path in tasks._fanart_paths('', {'save_dir': str(output)})],
+                         ['fanart1.png', 'fanart2.png', 'fanart10.png'])
+
+    def test_web_client_reads_prefixed_and_legacy_stills(self):
+        output = self.root / 'organized'
+        for directory in ('extrafanart', 'ABC-123-extrafanart', 'extrafanart-notes', 'Custom-stills'):
+            folder = output / directory
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / '0.png').write_bytes(b'x' * 20)
+        (output / 'extrafanart' / '1.png').write_bytes(b'x' * 20)
+        found = [path.parent.name for path in tasks._fanart_paths('', {'save_dir': str(output)})]
+        self.assertEqual(found, ['ABC-123-extrafanart', 'extrafanart', 'extrafanart'])
+        # 引擎上报的目录优先，即使目录名不以 extrafanart 结尾
+        reported = tasks._fanart_paths('', {'save_dir': str(output), 'stills_dir': str(output / 'Custom-stills')})
+        self.assertIn(output / 'Custom-stills' / '0.png', reported)
+        # 没有 save_dir 时按输入目录递归查找，兼容升级前的任务记录
+        recursive = [path.parent.name for path in tasks._fanart_paths(str(output), None)]
+        self.assertIn('ABC-123-extrafanart', recursive)
+        self.assertEqual(tasks._stills_target({'save_dir': str(output)}), output / 'extrafanart')
+        self.assertEqual(tasks._stills_target({'save_dir': str(output), 'stills_dir': str(output / 'Custom-stills')}), output / 'Custom-stills')
+        self.assertIsNone(tasks._stills_target({}))
+
     def test_existing_extrafanart_reaches_organization(self):
         paths = self.files('FC2-4953812-1.mp4', 'FC2-4953812-2.mp4')
         movie = scan_movies(str(self.root))[0]
@@ -269,19 +434,8 @@ class MultipartTests(unittest.TestCase):
         self.data['summarizer']['move_files'] = True
         self.data['summarizer']['path']['hard_link'] = False
         config = Cfg.model_validate(self.data)
-        tree = ast.parse((ROOT / 'vendor/JavSP/javsp/__main__.py').read_text(encoding='utf-8'))
-        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'RunNormalMode')
-        events = []
-        namespace = dict(os=os, time=Mock(), Cfg=lambda: config, logger=logging.getLogger('multipart-test'),
-                         tqdm=lambda *args, **kwargs: args[0] if args else Mock(), progress_enabled=lambda: True,
-                         progress_event=lambda stage, **kwargs: events.append((stage, kwargs)),
-                         fallback_media_type_id=lambda: 'normal', parallel_crawler=lambda *args: [movie.info],
-                         info_summary=lambda *args: True, generate_names=lambda *args: None,
-                         download_cover=lambda *args, **kwargs: None, download=lambda *args: {},
-                         valid_pic=lambda *args: True, get_fmt_size=lambda *args: '1 B',
-                         get_pic_size=lambda *args: (1, 1), write_nfo=Mock())
-        exec(compile(ast.Module(body=[function], type_ignores=[]), 'RunNormalMode', 'exec'), namespace)
-        self.assertEqual(namespace['RunNormalMode']([movie]), [movie])
+        returned, events = self.run_normal_mode(movie, config)
+        self.assertEqual(returned, [movie])
         self.assertEqual(sentinel.read_text(encoding='utf-8'), 'keep')
         self.assertTrue((output / 'FC2-4953812-CD1.mp4').exists())
         self.assertTrue((output / 'FC2-4953812-CD2.mp4').exists())

@@ -14,10 +14,9 @@ __all__ = ['scan_movies', 'get_fmt_size', 'get_remaining_path_len', 'replace_ill
 
 
 from javsp.avid import *
-from javsp.lib import re_escape
 from javsp.config import Cfg
 from javsp.datatype import Movie
-from javsp.multipart import part_number
+from javsp.multipart import legacy_part_order, part_number
 
 logger = logging.getLogger(__name__)
 failed_items = []
@@ -117,38 +116,15 @@ def scan_movies(root: str) -> List[Movie]:
         if all(number is not None for number in numbers) and len(set(numbers)) == len(numbers):
             dic[avid] = [path for _, path in sorted(zip(numbers, files))]
             continue
-        # 提取分片信息（如果正则替换成功，只会剩下单个小写字符）。相关变量都要使用同样的列表生成顺序
-        basenames = [os.path.basename(i) for i in files]
-        prefix = os.path.commonprefix(basenames)
-        try:
-            pattern_expr = re_escape(prefix) + r'\s*([a-z\d])\s*'
-            pattern = re.compile(pattern_expr, flags=re.I)
-        except re.error:
-            logger.debug(f"正则识别影片分片信息时出错: '{pattern_expr}'")
-            del dic[avid]
-            continue
-        remaining = [pattern.sub(r'\1', i).lower() for i in basenames]
-        postfixes = [i[1:] for i in remaining]
-        slices = [i[0] for i in remaining]
-        # 如果有不同的后缀，说明有文件名不符合正则表达式条件（没有发生替换或不带分片信息）
-        if (len(set(postfixes)) != 1
-            # remaining为初步提取的分片信息，不允许有重复值
-            or len(slices) != len(set(slices))):
-            logger.debug(f"无法识别分片信息: {prefix=}, {remaining=}")
+        # 兼容旧命名（如 FCDSS-027-A / FCDSS-027-B，也即 Emby 文档中的 moviename#.ext）
+        # 由公共前缀提取单个字母/数字分片标记；Web 与 CLI 共用同一份实现
+        ordered = legacy_part_order(files)
+        if ordered is None:
+            logger.debug(f"无法识别分片信息: {files=}")
             non_slice_dup[avid] = files
             del dic[avid]
             continue
-        # 影片编号必须从 0/1/a 开始且编号连续
-        sorted_slices = sorted(slices)
-        first, last = sorted_slices[0], sorted_slices[-1]
-        if (first not in ('0', '1', 'a')) or (ord(last) != (ord(first)+len(sorted_slices)-1)):
-            logger.debug(f"无效的分片起始编号或分片编号不连续: {sorted_slices=}")
-            non_slice_dup[avid] = files
-            del dic[avid]
-            continue
-        # 生成最终的分片信息
-        mapped_files = [files[slices.index(i)] for i in sorted_slices]
-        dic[avid] = mapped_files
+        dic[avid] = ordered
 
     # 汇总输出错误提示信息
     msg = ''

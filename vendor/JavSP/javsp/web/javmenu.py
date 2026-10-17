@@ -1,93 +1,99 @@
-"""从JavMenu抓取数据"""
+"""从JavMenu抓取数据
+
+站点已改为 /<语言>/<番号> 形式（如 https://javmenu.com/zh/URE-123），
+且详情不再放在固定的 div 结构里，而是集中在 meta 描述与封面图的 data-src 中。
+找不到影片时站点会返回“猜你喜欢”页面，需要据此抛出 MovieNotFoundError。
+"""
 import logging
-from urllib.parse import urlparse
+import re
 
 from javsp.web.base import Request, resp2html
 from javsp.web.exceptions import *
 from javsp.datatype import MovieInfo
-from javsp.web.parsing import first, class_xpath, detail_container
 
 
 request = Request()
 
 logger = logging.getLogger(__name__)
-base_url = 'https://mrzyx.xyz'
+base_url = 'https://javmenu.com'
+# 找不到资源时站点返回的页面标题
+NOT_FOUND_TITLES = ('猜你喜欢', 'あなたは好きかもしれません', 'You may also like')
+
+
+def _first(html, xpath, default=''):
+    values = html.xpath(xpath)
+    if not values:
+        return default
+    value = values[0]
+    return (value.strip() if isinstance(value, str) else value) or default
+
+
+def _split_items(text):
+    return [item.strip() for item in re.split(r'[、,，]', text or '') if item.strip()]
+
+
+def parse_meta(description: str) -> dict:
+    """从站点的一句话描述里取出日期、女优、时长与主题"""
+    data = {}
+    match = re.search(r'发[佈布]\s*日期为\s*(\d{4}-\d{2}-\d{2})', description or '')
+    if match:
+        data['publish_date'] = match.group(1)
+    match = re.search(r'主演女[优優]是(.+?)(?:，|。|$)', description or '')
+    if match:
+        data['actress'] = _split_items(match.group(1))
+    match = re.search(r'影片时[长長]\s*(\d+)\s*分钟', description or '')
+    if match:
+        data['duration'] = match.group(1)
+    match = re.search(r'主题为(.+?)(?:。|$)', description or '')
+    if match:
+        data['genre'] = _split_items(match.group(1))
+    return data
 
 
 def parse_data(movie: MovieInfo):
     """从网页抓取并解析指定番号的数据
+
     Args:
         movie (MovieInfo): 要解析的影片信息，解析后的信息直接更新到此变量内
     """
-    # JavMenu网页做得很不走心，将就了
-    url = f'{base_url}/{movie.dvdid}'
-    r = request.get(url)
-    if r.history and urlparse(r.url).path.rstrip('/') == '':
-        # 被重定向到主页说明找不到影片资源
+    url = f'{base_url}/zh/{movie.dvdid}'
+    r = request.get(url, delay_raise=True)
+    html = resp2html(r)
+    page_title = _first(html, '//meta[@property="og:title"]/@content')
+    if not page_title or any(marker in page_title for marker in NOT_FOUND_TITLES):
         raise MovieNotFoundError(__name__, movie.dvdid)
 
-    html = resp2html(r)
-    container = detail_container(html, f"//div[{class_xpath('col-md-9')} and {class_xpath('px-0')}]", 'javmenu', movie.dvdid)
-    title = ''.join(container.xpath(".//h1//text()")).strip()
+    description = _first(html, '//meta[@name="description"]/@content')
+    title = page_title
+    for suffix in ('  | JAV目錄大全 | 每日更新', ' 免費在線看', ' 免費AV在線看'):
+        title = title.replace(suffix, '')
+    prefix = f'{movie.dvdid} '
+    if title.startswith(prefix):
+        title = title[len(prefix):]
+    # 标题里偶尔会重复番号，清掉后再校验
+    title = title.replace(movie.dvdid, '').strip()
     if not title:
         raise WebsiteError('javmenu: 页面缺少影片标题，无法确认有效资料')
-    # 竟然还在标题里插广告，真的疯了。要不是我已经写了抓取器，才懒得维护这个破站
-    title = title.replace('  | JAV目錄大全 | 每日更新', '')
-    title = title.replace(' 免費在線看', '').replace(' 免費AV在線看', '')
-    cover_tag = container.xpath("//div[@class='single-video']")
-    if len(cover_tag) > 0:
-        video_tag = cover_tag[0].find('video')
-        # URL首尾竟然也有空格……
-        if video_tag is not None:
-            movie.cover = (video_tag.get('data-poster') or video_tag.get('poster') or '').strip() or None
-        # 预览影片改为blob了，无法获取
-        # movie.preview_video = video_tag.find('source').get('src').strip()
-    if not movie.cover:
-        cover_img_tag = container.xpath("//img[@class='lazy rounded']/@data-src")
-        if cover_img_tag:
-            movie.cover = cover_img_tag[0].strip()
-    info = first(container, f".//div[{class_xpath('card-body')}]", container)
-    publish_date = first(info, ".//span[contains(text(), '日期:')]/following-sibling::*[1]/text()")
-    duration = first(info, ".//span[contains(text(), '時長:')]/following-sibling::*[1]/text()", '').replace('分鐘', '').strip() or None
-    producer = info.xpath("div/span[contains(text(), '製作:')]/following-sibling::a/span/text()")
-    if producer:
-        movie.producer = producer[0]
-    genre_tags = info.xpath("//a[@class='genre']")
-    genre, genre_id = [], []
-    for tag in genre_tags:
-        items = (tag.get('href') or '').split('/')
-        if len(items) < 3 or not tag.text:
-            continue
-        pre_id = items[-3] + '/' + items[-1]
-        genre.append(tag.text.strip())
-        genre_id.append(pre_id)
-        # genre的链接中含有censored字段，但是无法用来判断影片是否有码，因为完全不可靠……
-    actress = info.xpath("div/span[contains(text(), '女優:')]/following-sibling::*/a/text()") or None
-    magnet_table = container.xpath("//table[contains(@class, 'magnet-table')]/tbody")
-    if magnet_table:
-        magnet_links = magnet_table[0].xpath("tr/td/a/@href")
-        # 它的FC2数据是从JavDB抓的，JavDB更换图片服务器后它也跟上了，似乎数据更新频率还可以
-        movie.magnet = [i.replace('[javdb.com]','') for i in magnet_links]
-    preview_pics = container.xpath("//a[@data-fancybox='gallery']/@href")
 
-    if (not movie.cover) and preview_pics:
-        movie.cover = preview_pics[0]
+    covers = [value.strip() for value in html.xpath('//img/@data-src')
+              if isinstance(value, str) and ('/covers/' in value or '/cover/' in value)]
+    covers = [value for value in covers if value.startswith('http')]
+    if not covers:
+        covers = [value.strip() for value in html.xpath('//meta[@property="og:image"]/@content')
+                  if isinstance(value, str) and value.startswith('http') and 'logo' not in value]
+
     movie.url = url
-    movie.title = title.replace(movie.dvdid, '').strip()
-    movie.preview_pics = preview_pics
-    movie.publish_date = publish_date
-    movie.duration = duration
-    movie.genre = genre
-    movie.genre_id = genre_id
-    movie.actress = actress
+    movie.title = title
+    movie.cover = covers[0] if covers else None
+    meta = parse_meta(description)
+    movie.publish_date = meta.get('publish_date')
+    movie.actress = meta.get('actress') or None
+    movie.duration = meta.get('duration')
+    movie.genre = meta.get('genre') or []
 
 
 if __name__ == "__main__":
-    import pretty_errors
-    pretty_errors.configure(display_link=True)
-    logger.root.handlers[1].level = logging.DEBUG
-
-    movie = MovieInfo('FC2-718323')
+    movie = MovieInfo('URE-123')
     try:
         parse_data(movie)
         print(movie)

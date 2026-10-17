@@ -24,7 +24,7 @@ _FIELD_LABELS = {
     "title": "标题", "remove_trailing_actor_name": "移除标题末尾演员名", "default": "缺失信息替代文本", "actress": "演员",
     "series": "系列", "director": "导演", "producer": "制作商", "publisher": "发行商", "nfo": "NFO 文件",
     "title_pattern": "标题模板", "custom_genres_fields": "自定义分类字段", "custom_tags_fields": "自定义标签字段", "censor_options_representation": "码状态显示文本",
-    "cover": "封面", "fanart": "横版封面", "extra_fanarts": "剧照", "enabled": "是否启用", "scrap_interval": "请求间隔",
+    "cover": "封面", "fanart": "横版封面", "extra_fanarts": "剧照", "enabled": "是否启用", "scrap_interval": "请求间隔", "folder_prefix": "剧照文件夹名前缀",
     "highres": "优先下载高清封面", "google_search_fallback": "Google 搜索封面兜底", "add_label": "添加水印标签", "crop": "封面裁剪", "on_id_pattern": "启用裁剪的番号规则",
     "engine": "引擎配置", "fields": "翻译字段", "plot": "剧情简介", "app_id": "应用 ID", "api_key": "API 密钥", "url": "接口地址", "model": "模型名称",
     "interactive": "终端交互", "check_update": "检查更新", "auto_update": "自动下载更新",

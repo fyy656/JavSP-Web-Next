@@ -18,6 +18,10 @@ function client() {
     loadTasks: async () => {},
     escapeHtml: value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'),
     taskDisplayName: task => task.name,
+    // 影片卡片用到、但不在本测试切片范围内的渲染辅助函数
+    imageProgressSummary: task => `封面 ${task.cover_count || 0} 张`,
+    progressMarkup: () => '',
+    expandControlIcon: () => '',
   });
   vm.runInContext(section('function clearManualFileSelection()', 'function setPathTarget('), context);
   vm.runInContext(section('async function submitManualTask(', "$('#task-form').addEventListener('submit', submitManualTask);"), context);
@@ -101,6 +105,17 @@ async function main() {
     assert.match(markup, /发现 4 个文件/);
     assert.ok(!markup.includes('<unsafe>'));
     assert.ok(!markup.includes('<img'));
+    // 排队中同样必须能取消：详情对话框与列表都依赖 taskStopButton
+    const queuedScan = context.taskCard({ id: 'scan-q', task_type: 'scan', name: '排队扫描', status: 'queued', input_directory: 'X:/mount', scan: {} });
+    assert.match(queuedScan, /停止扫描/, 'queued scans must be cancellable');
+    const queuedMovie = context.taskCard({ id: 'movie-q', name: 'ABC-123', status: 'queued', input_directory: 'X:/mount/ABC-123.mp4' });
+    assert.match(queuedMovie, /停止任务/, 'queued movie tasks must be cancellable');
+    assert.match(queuedMovie, /cancelTask\('movie-q'\)/);
+    const finished = context.taskCard({ id: 'movie-done', name: 'ABC-124', status: 'succeeded', input_directory: 'X:/mount/ABC-124.mp4' });
+    assert.ok(!finished.includes('停止任务'), 'finished tasks must not offer a stop button');
+    assert.equal(context.taskStopButton({ id: 'x', status: 'cancelled' }), '');
+    assert.equal(context.taskStopButton(null), '');
+    assert.match(context.taskStopButton({ id: 'x', status: 'running', task_type: 'scan' }), /停止扫描/);
   }
   console.log('Scan client checks passed: directory, single batch, edited paths, duplicate clicks, retry, native multiselect and progress rendering.');
 }

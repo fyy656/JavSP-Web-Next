@@ -215,6 +215,8 @@ class NFOSummarize(BaseConfig):
 class ExtraFanartSummarize(BaseConfig):
     enabled: bool
     scrap_interval: Duration
+    # 剧照文件夹名的前缀，实际文件夹名为「前缀 + extrafanart」；留空即 extrafanart
+    folder_prefix: str = ''
 
 class SlimefaceEngine(BaseConfig):
     name: Literal['slimeface']

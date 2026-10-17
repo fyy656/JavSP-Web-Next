@@ -188,6 +188,8 @@ summarizer:
   extra_fanarts:
     # 是否下载剧照？
     enabled: true
+    # 剧照文件夹名的前缀，可以使用如`{num}`、`{title}`等字段；实际文件夹名为「前缀 + extrafanart」，留空即 extrafanart
+    folder_prefix: ""
     # 间隔的两次封面爬取请求之间应该间隔多久
     scrap_interval: PT1.5S
 

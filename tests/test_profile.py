@@ -1,9 +1,17 @@
-import tempfile, unittest
+import os, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 from fastapi.testclient import TestClient
+
+# 导入 javsp_web.server 会当场执行启动流程，先把数据目录指向临时位置，
+# 避免测试进程改写正在运行的真实数据。
+os.environ.setdefault('JAVSP_WEB_DATA_DIR', str(Path(tempfile.gettempdir()) / 'javsp-web-testdata'))
+
 from javsp_web import storage
-from javsp_web import server
+
+# 后台调度线程会在测试进程里打开临时目录中的 tasks.db，导致收尾删除失败。
+with patch('threading.Thread.start'):
+    from javsp_web import server
 
 class ProfileTests(unittest.TestCase):
     def setUp(self):

@@ -1,11 +1,17 @@
 import copy
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
+
+# 本模块在 unittest discover 的字母序里最先导入。storage 会在首次导入时按环境变量
+# 固定数据目录路径，因此必须在导入 javsp_web 之前指向临时目录，否则整套测试可能
+# 触发 server 启动流程并改写正在运行的真实 data/（恢复中断任务等）。
+os.environ.setdefault('JAVSP_WEB_DATA_DIR', str(Path(tempfile.gettempdir()) / 'javsp-web-testdata'))
 
 from javsp_web import ai, ai_router, ai_tools, storage, tasks
 

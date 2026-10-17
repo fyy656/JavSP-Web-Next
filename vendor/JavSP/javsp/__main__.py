@@ -341,6 +341,19 @@ def info_summary(movie: Movie, all_info: Dict[str, MovieInfo]):
     movie.info = final_info
     return True
 
+def extra_fanart_dir(save_dir: str, prefix_pattern: str, fields: Dict[str, str]) -> str:
+    """生成剧照文件夹路径：`前缀 + extrafanart`，前缀留空时即 `extrafanart`
+
+    前缀与封面/NFO等文件名使用同一套字段，非法字符会被替换，
+    且结果始终是 save_dir 的直接子目录（分隔符不能改变目录层级）。
+    """
+    prefix = prefix_pattern.format(**fields) if prefix_pattern else ''
+    prefix = replace_illegal_chars(prefix).strip()
+    # 反斜杠在 Linux 上是合法文件名字符，但同一份预设可能在 Windows 上使用，故一并去掉
+    prefix = prefix.replace('\\', '')
+    return os.path.join(save_dir, prefix + 'extrafanart')
+
+
 def generate_names(movie: Movie):
     """按照模板生成相关文件的文件名"""
 
@@ -354,6 +367,8 @@ def generate_names(movie: Movie):
     info = movie.info
     # 准备用来填充命名模板的字典
     d = info.get_info_dic()
+    # 原始影片文件名（不含扩展名；多分片取第一个分片），供命名模板的 {filename} 使用
+    d['filename'] = os.path.splitext(os.path.basename(str(movie.files[0])))[0] if movie.files else ''
 
     if info.actress and len(info.actress) > Cfg().summarizer.path.max_actress_count:
         logging.debug('女优人数过多，按配置保留了其中的前n个: ' + ','.join(info.actress))
@@ -393,6 +408,8 @@ def generate_names(movie: Movie):
             movie.fanart_file = legalize_path(movie.fanart_file)
         if movie.poster_file != None:
             movie.poster_file = legalize_path(movie.poster_file)
+        if movie.extrafanart_dir != None:
+            movie.extrafanart_dir = legalize_path(movie.extrafanart_dir)
         if d['title'] != copyd['title']:
             logger.info(f"自动截短标题为:\n{copyd['title']}")
         if d['rawtitle'] != copyd['rawtitle']:
@@ -422,6 +439,7 @@ def generate_names(movie: Movie):
                 movie.nfo_file = os.path.join(save_dir, Cfg().summarizer.nfo.basename_pattern.format(**copyd) + '.nfo')
                 movie.fanart_file = os.path.join(save_dir, Cfg().summarizer.fanart.basename_pattern.format(**copyd) + '.jpg')
                 movie.poster_file = os.path.join(save_dir, Cfg().summarizer.cover.basename_pattern.format(**copyd) + '.jpg')
+                movie.extrafanart_dir = extra_fanart_dir(save_dir, Cfg().summarizer.extra_fanarts.folder_prefix, copyd)
                 return legalize_info()
     else:
         # 以防万一，当整理路径非常深或者标题起始很长一段没有标点符号时，硬性截短生成的名称
@@ -442,6 +460,7 @@ def generate_names(movie: Movie):
         movie.nfo_file = os.path.join(save_dir, Cfg().summarizer.nfo.basename_pattern.format(**copyd) + '.nfo')
         movie.fanart_file = os.path.join(save_dir, Cfg().summarizer.fanart.basename_pattern.format(**copyd) + '.jpg')
         movie.poster_file = os.path.join(save_dir, Cfg().summarizer.cover.basename_pattern.format(**copyd) + '.jpg')
+        movie.extrafanart_dir = extra_fanart_dir(save_dir, Cfg().summarizer.extra_fanarts.folder_prefix, copyd)
 
         return legalize_info()
 
@@ -581,16 +600,18 @@ def RunNormalMode(all_movies):
             progress_event('image_sources', cover_urls=list(movie.info.big_covers or []) + list(movie.info.covers or []), preview_pics=list(movie.info.preview_pics or []))
 
             generate_names(movie)
+            # 剧照文件夹由 generate_names 写入；替身对象或旧对象可能没有该属性
+            stills_dir = os.path.abspath(movie.extrafanart_dir) if getattr(movie, 'extrafanart_dir', None) else ''
             check_step(movie.save_dir, '无法按命名规则生成目标文件夹')
             policy = Cfg().summarizer.existing_file_policy
             if Cfg().summarizer.move_files and not movie.prepare_organization(policy):
-                progress_event('output', save_dir=os.path.abspath(movie.save_dir), fanart_file=os.path.abspath(movie.fanart_file), poster_file=os.path.abspath(movie.poster_file))
+                progress_event('output', save_dir=os.path.abspath(movie.save_dir), fanart_file=os.path.abspath(movie.fanart_file), poster_file=os.path.abspath(movie.poster_file), stills_dir=stills_dir)
                 return_movies.append(movie)
                 progress_event('movie', status='completed', index=movie_index, total=len(all_movies), title=movie.info.title, retained_existing=True)
                 continue
             if not os.path.exists(movie.save_dir):
                 os.makedirs(movie.save_dir)
-            progress_event('output', save_dir=os.path.abspath(movie.save_dir), fanart_file=os.path.abspath(movie.fanart_file), poster_file=os.path.abspath(movie.poster_file))
+            progress_event('output', save_dir=os.path.abspath(movie.save_dir), fanart_file=os.path.abspath(movie.fanart_file), poster_file=os.path.abspath(movie.poster_file), stills_dir=stills_dir)
 
             inner_bar.set_description('下载封面图片')
             progress_event('images', done=0, total=1, kind='cover', status='downloading')
@@ -621,7 +642,7 @@ def RunNormalMode(all_movies):
 
                 # download_cover may choose a different extension from the source URL.
                 # Persist the actual paths before reporting success (also when move_files is off).
-                progress_event('output', save_dir=os.path.abspath(movie.save_dir), fanart_file=os.path.abspath(movie.fanart_file), poster_file=os.path.abspath(movie.poster_file))
+                progress_event('output', save_dir=os.path.abspath(movie.save_dir), fanart_file=os.path.abspath(movie.fanart_file), poster_file=os.path.abspath(movie.poster_file), stills_dir=stills_dir)
                 try:
                     process_poster(movie)
                 except Exception as e:
@@ -635,7 +656,9 @@ def RunNormalMode(all_movies):
                 inner_bar.set_description('下载剧照')
                 if movie.info.preview_pics:
                     progress_event('images', done=0, total=len(movie.info.preview_pics), kind='fanart')
-                    extrafanartdir = movie.save_dir + '/extrafanart'
+                    # 剧照文件夹由预设的 extra_fanarts.folder_prefix 决定（前缀 + extrafanart），
+                    # 未启用整理或旧版本配置下回退到 save_dir/extrafanart
+                    extrafanartdir = stills_dir or os.path.join(movie.save_dir, 'extrafanart')
                     os.makedirs(extrafanartdir, exist_ok=True)
                     for (id, pic_url) in enumerate(movie.info.preview_pics):
                         inner_bar.set_description(f"Downloading extrafanart {id} from url: {pic_url}")

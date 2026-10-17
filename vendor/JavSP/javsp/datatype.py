@@ -139,6 +139,7 @@ class Movie:
         self.nfo_file = None            # nfo文件的路径
         self.fanart_file = None         # fanart文件的路径
         self.poster_file = None         # poster文件的路径
+        self.extrafanart_dir = None     # 剧照文件夹的路径（`前缀 + extrafanart`，见 summarizer.extra_fanarts.folder_prefix）
         self.guid = None                # GUI使用的唯一标识，通过dvdid和files做md5生成
 
     @cached_property
@@ -217,7 +218,7 @@ class Movie:
                     stem = os.path.splitext(os.path.basename(artwork))[0].casefold()
                     assets.extend(os.path.join(os.path.dirname(artwork), name) for name in os.listdir(os.path.dirname(artwork))
                                   if os.path.splitext(name)[0].casefold() == stem and os.path.splitext(name)[1].casefold() in image_extensions)
-            stills = os.path.join(self.save_dir, 'extrafanart')
+            stills = getattr(self, 'extrafanart_dir', None) or os.path.join(self.save_dir, 'extrafanart')
             if os.path.isdir(stills):
                 assets.extend(os.path.join(stills, name) for name in os.listdir(stills)
                               if os.path.splitext(name)[1].casefold() in image_extensions)
