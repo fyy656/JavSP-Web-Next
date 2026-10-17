@@ -16,7 +16,8 @@ import requests
 
 from . import __version__, app_update, storage
 
-REPOSITORY = 'apecme/javsp-web'
+REGISTRY_HOST = 'ghcr.io'
+REPOSITORY = REGISTRY_HOST + '/fyy656/javsp-web'
 ACTIVE = {'scheduled', 'downloading', 'restarting'}
 _lock = threading.RLock()
 _check_lock = threading.Lock()
@@ -100,8 +101,9 @@ def _get_json(url, **kwargs):
 
 def registry_target(tag, architecture=None, variant=''):
     """Read the exact platform image config. No image layers are downloaded."""
-    token = _get_json('https://auth.docker.io/token', params={'service': 'registry.docker.io', 'scope': 'repository:' + REPOSITORY + ':pull'})['token']
-    base = 'https://registry-1.docker.io/v2/' + REPOSITORY
+    path = REPOSITORY[len(REGISTRY_HOST) + 1:]
+    token = _get_json('https://ghcr.io/token', params={'service': REGISTRY_HOST, 'scope': 'repository:' + path + ':pull'})['token']
+    base = 'https://ghcr.io/v2/' + path
     headers = {'Authorization': 'Bearer ' + token, 'Accept': ', '.join([
         'application/vnd.oci.image.index.v1+json', 'application/vnd.docker.distribution.manifest.list.v2+json',
         'application/vnd.oci.image.manifest.v1+json', 'application/vnd.docker.distribution.manifest.v2+json'])}

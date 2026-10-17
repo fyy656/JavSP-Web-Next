@@ -229,7 +229,13 @@ def normalize_path(value) -> str:
 
 
 def _metrics(db):
-    metrics = dict(db.execute("SELECT count(*) AS total, coalesce(sum(status IN ('queued','running')),0) AS running FROM tasks").fetchone())
+    metrics = dict(db.execute("""SELECT count(*) AS total,
+        coalesce(sum(status IN ('queued','running')),0) AS running,
+        coalesce(sum(status='queued'),0) AS queued,
+        coalesce(sum(status='succeeded'),0) AS succeeded,
+        coalesce(sum(status='failed'),0) AS failed,
+        coalesce(sum(status='cancelled'),0) AS cancelled
+        FROM tasks""").fetchone())
     latest = db.execute('SELECT status FROM tasks ORDER BY created_at DESC,id LIMIT 1').fetchone()
     metrics['latest_status'] = latest[0] if latest else ''
     return metrics
@@ -314,9 +320,9 @@ def overview_groups(group_by='actress', offset=0, limit=24, query='', libraries=
             'all': everything, 'metrics': metrics}
 
 
-def page(limit=50, offset=0, view='all', query='', field='all', status='', size_min=None,
-         size_max=None, date_from='', date_to='', sort='created_at', direction='desc',
-         group_by='', group='', group_roots=None):
+def _task_conditions(view='all', query='', field='all', status='', size_min=None, size_max=None,
+                     date_from='', date_to='', group_by='', group='', group_roots=None):
+    """Shared WHERE fragments for task lists, id lookup and record purges."""
     # All SQL fragments come from this fixed vocabulary; user values are bound.
     conditions, params = [], []
     if view == 'overview' and group_by in GROUP_FIELDS:
@@ -324,7 +330,9 @@ def page(limit=50, offset=0, view='all', query='', field='all', status='', size_
         conditions.append(condition)
         params.extend(values)
     if view == 'manual':
-        conditions.append("(coalesce(json_extract(summary,'$.source'),'manual')='manual' OR json_extract(summary,'$.image_retry_started_at') IS NOT NULL)")
+        # 从媒体库发起的任务也要出现在任务队列里，否则用户看不到它们正在运行或已经卡住
+        conditions.append("(coalesce(json_extract(summary,'$.source'),'manual') IN ('manual','library')"
+                          " OR json_extract(summary,'$.image_retry_started_at') IS NOT NULL)")
     if status:
         conditions.append('status=?')
         params.append(status)
@@ -342,6 +350,14 @@ def page(limit=50, offset=0, view='all', query='', field='all', status='', size_
         if value:
             conditions.append(f'julianday(created_at){op}julianday(?)')
             params.append(value)
+    return conditions, params
+
+
+def page(limit=50, offset=0, view='all', query='', field='all', status='', size_min=None,
+         size_max=None, date_from='', date_to='', sort='created_at', direction='desc',
+         group_by='', group='', group_roots=None):
+    conditions, params = _task_conditions(view, query, field, status, size_min, size_max,
+                                          date_from, date_to, group_by, group, group_roots)
     where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
     with connection() as db:
         db.execute('BEGIN')
@@ -367,3 +383,78 @@ def page(limit=50, offset=0, view='all', query='', field='all', status='', size_
             order = " ORDER BY (status IN ('queued','running')) DESC, CASE WHEN status IN ('queued','running') THEN created_at END ASC, created_at DESC,id"
             items = [json.loads(row[0]) for row in db.execute('SELECT summary FROM tasks' + where + order + ' LIMIT ? OFFSET ?', [*params, limit, offset])]
         return {'items': items, 'total': total, 'limit': limit, 'offset': offset, 'metrics': metrics}
+
+
+def ids(view='all', query='', field='all', status='', size_min=None, size_max=None,
+        date_from='', date_to='', group_by='', group='', group_roots=None):
+    """Every task id behind the current filter, used for "select all matches"."""
+    conditions, params = _task_conditions(view, query, field, status, size_min, size_max,
+                                          date_from, date_to, group_by, group, group_roots)
+    with connection() as db:
+        if view == 'overview':
+            where = ' WHERE rank=1' + (' AND ' + ' AND '.join(conditions) if conditions else '')
+            rows = db.execute(_ELIGIBLE + 'SELECT task_ids FROM eligible' + where, params).fetchall()
+            result = []
+            for row in rows:
+                result.extend(json.loads(row['task_ids'] or '[]'))
+            return result
+        where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
+        return [row[0] for row in db.execute('SELECT id FROM tasks' + where + ' ORDER BY created_at DESC,id', params)]
+
+
+def statuses(task_ids):
+    ids_list = [str(item) for item in task_ids]
+    result = {}
+    with connection() as db:
+        for start in range(0, len(ids_list), 500):
+            batch = ids_list[start:start + 500]
+            if not batch:
+                continue
+            result.update(dict(db.execute('SELECT id,status FROM tasks WHERE id IN (' + ','.join('?' for _ in batch) + ')', batch)))
+    return result
+
+
+def delete_many(task_ids):
+    ids_list = [str(item) for item in dict.fromkeys(task_ids) if str(item)]
+    if not ids_list:
+        return 0
+    deleted = 0
+    with connection() as db:
+        for start in range(0, len(ids_list), 500):
+            batch = ids_list[start:start + 500]
+            deleted += db.execute('DELETE FROM tasks WHERE id IN (' + ','.join('?' for _ in batch) + ')', batch).rowcount
+    return deleted
+
+
+def purge_candidates(statuses_list, before='', include_scan=False, view='all', query='', field='all',
+                     size_min=None, size_max=None, date_from='', date_to='', group_by='', group='', group_roots=None):
+    """Records matching a purge request, with a rough byte estimate for the preview."""
+    conditions, params = _task_conditions(view, query, field, '', size_min, size_max,
+                                          date_from, date_to, group_by, group, group_roots)
+    allowed = [state for state in statuses_list if state in {'succeeded', 'failed', 'cancelled'}]
+    if not allowed:
+        allowed = ['succeeded', 'failed', 'cancelled']
+    conditions.append('status IN (' + ','.join('?' for _ in allowed) + ')')
+    params.extend(allowed)
+    if before:
+        conditions.append('julianday(created_at)<julianday(?)')
+        params.append(before)
+    if not include_scan:
+        conditions.append("coalesce(json_extract(summary,'$.task_type'),'movie')<>'scan'")
+    where = ' WHERE ' + ' AND '.join(conditions)
+    with connection() as db:
+        rows = db.execute("""SELECT t.id,t.created_at,t.status,
+            coalesce(json_extract(t.summary,'$.input_directory'),'') AS input_directory,
+            coalesce(json_extract(t.summary,'$.task_type'),'movie') AS task_type,
+            length(t.payload)+coalesce(length(l.lines),0) AS bytes
+            FROM tasks t LEFT JOIN task_logs l ON l.id=t.id""" + where + ' ORDER BY t.created_at DESC,t.id', params).fetchall()
+        return [dict(row) for row in rows]
+
+
+def vacuum():
+    from .storage import TASKS_DB_FILE
+    db = sqlite3.connect(TASKS_DB_FILE, timeout=30)
+    try:
+        db.execute('VACUUM')
+    finally:
+        db.close()

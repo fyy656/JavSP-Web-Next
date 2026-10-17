@@ -6,7 +6,7 @@
 
 完整的安装、配置、刮削、AI、自动化、故障排查和接口说明，请查看官网文档：
 
-## [打开 JavSP WEB 官网文档](https://apecme.github.io/JavSP-Web/)
+## [打开 JavSP WEB 官网文档](https://fyy656.github.io/JavSP-Web/)
 
 ## 主要功能
 
@@ -24,7 +24,7 @@
 
 ### Windows
 
-1. 从 [Releases](https://github.com/APecme/JavSP-Web/releases/latest) 下载 `JavSP-Web.exe`。
+1. 从 [Releases](https://github.com/fyy656/JavSP-Web/releases/latest) 下载 `JavSP-Web.exe`。
 2. 双击运行，浏览器打开 `http://127.0.0.1:8090/login`。
 3. 首次使用账号和密码均为 `admin`，登录后立即在“系统设置 → 用户管理”修改密码。
 
@@ -37,7 +37,7 @@
 ```yaml
 services:
   javsp-web:
-    image: apecme/javsp-web:latest
+    image: ghcr.io/fyy656/javsp-web:latest
     container_name: javsp-web
     restart: unless-stopped
     ports:

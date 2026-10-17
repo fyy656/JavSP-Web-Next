@@ -341,6 +341,31 @@ def info_summary(movie: Movie, all_info: Dict[str, MovieInfo]):
     movie.info = final_info
     return True
 
+def forced_avid() -> str:
+    """网页端媒体库允许手动指定番号，通过环境变量传入，避免改写源文件名来"骗"识别器"""
+    return os.environ.get('JAVSP_FORCED_AVID', '').strip().upper()
+
+
+def apply_forced_avid(movie):
+    """用外部指定的番号覆盖从文件名推断出的番号
+
+    `JAVSP_FORCED_AVID_PATH` 给出该番号对应的视频；进程内处理多部影片时只作用于它，
+    未提供时（网页端一部影片一个进程）作用于本次运行的全部影片。
+    """
+    value = forced_avid()
+    if not value:
+        return movie
+    target = os.environ.get('JAVSP_FORCED_AVID_PATH', '').strip()
+    if target:
+        expected = os.path.normcase(os.path.abspath(target))
+        files = {os.path.normcase(os.path.abspath(item)) for item in getattr(movie, 'files', None) or []}
+        if expected not in files:
+            return movie
+    logger.info('使用外部指定的番号: %s', value)
+    movie.dvdid = value
+    return movie
+
+
 def extra_fanart_dir(save_dir: str, prefix_pattern: str, fields: Dict[str, str]) -> str:
     """生成剧照文件夹路径：`前缀 + extrafanart`，前缀留空时即 `extrafanart`
 
@@ -542,6 +567,7 @@ def RunNormalMode(all_movies):
     return_movies = []
     failed_movies = []
     for movie_index, movie in enumerate(outer_bar, start=1):
+        movie = apply_forced_avid(movie)
         inner_bar = None
         try:
             # 初始化本次循环要整理影片任务

@@ -350,7 +350,8 @@ class TranslationPipelineTests(unittest.TestCase):
                          tqdm=lambda *args, **kwargs: args[0] if args else Mock(),
                          progress_enabled=lambda: True, progress_event=lambda stage, **values: events.append((stage, values)),
                          parallel_crawler=Mock(return_value={'test': object()}), info_summary=Mock(return_value=True),
-                         fallback_media_type_id=lambda: 'normal', translate_movie_info=translate, generate_names=output)
+                         fallback_media_type_id=lambda: 'normal', translate_movie_info=translate, generate_names=output,
+                         apply_forced_avid=lambda item: item)
         tree = ast.parse((ROOT / 'vendor/JavSP/javsp/__main__.py').read_text(encoding='utf-8'))
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'RunNormalMode')
         exec(compile(ast.Module(body=[function], type_ignores=[]), 'translation-worker-test', 'exec'), namespace)

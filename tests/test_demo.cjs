@@ -24,7 +24,7 @@ function demo() {
 }
 
 test('demo uses the current application assets and all documentation links resolve', () => {
-  for (const name of ['theme.css', 'theme.js', 'community.js', 'app.js', 'app.css', 'overrides.css', 'cinema.css', 'ai.js', 'ai-markdown.js']) {
+  for (const name of ['theme.css', 'theme.js', 'community.js', 'app.js', 'library.js', 'app.css', 'overrides.css', 'cinema.css', 'ai.js', 'ai-markdown.js']) {
     assert.equal(read(`docs/assets/${name === 'app.js' ? 'demo-app.js' : name}`), read(`javsp_web/web/assets/${name}`));
   }
   const pages = ['docs.html', ...fs.readdirSync(path.join(root, 'docs')).filter(file => /^guide-.*\.html$/.test(file))];
@@ -39,6 +39,64 @@ test('demo uses the current application assets and all documentation links resol
     }
   }
   assert.match(read('docs/demo.html'), /demo-seed.js.*\n<script src="demo-mock.js/);
+});
+
+test('media library demo exposes libraries, folders, statuses and manual editing', async () => {
+  const { json, request } = demo();
+  const libraries = (await json('/api/library/libraries')).libraries;
+  assert.equal(libraries.length, 2);
+  assert.equal(libraries[0].name, '全部影片');
+  assert.equal(libraries[0].folders.length, 2);
+  assert.equal(libraries[0].film_count, 5);
+  const libraryId = libraries[0].id;
+
+  const films = await json(`/api/library/films?limit=50&library_id=${libraryId}`);
+  assert.equal(films.total, 5);
+  assert.equal(films.stats.complete, 1);
+  const byId = Object.fromEntries(films.items.map(item => [item.dvdid, item]));
+  assert.equal(byId['DEMO-002'].status, 'partial');
+  assert.equal(byId['DEMO-003'].status, 'unscraped');
+  assert.equal(byId['DEMO-004'].scrape_state, 'failed');
+  assert.equal(byId['DEMO-005'].status, 'missing');
+  assert.equal((await json(`/api/library/films?status=partial&library_id=${libraryId}`)).total, 1);
+  assert.equal((await json(`/api/library/films?query=DEMO-004&library_id=${libraryId}`)).items[0].status, 'failed');
+
+  // 库内单个文件夹也能单独过滤
+  const folderId = libraries[0].folders[0].id;
+  assert.equal((await json(`/api/library/films?limit=50&folder_id=${folderId}`)).total, 3);
+  // 空库没有影片
+  assert.equal((await json(`/api/library/films?limit=50&library_id=${libraries[1].id}`)).total, 0);
+
+  assert.deepEqual((await json(`/api/library/groups?by=actress&library_id=${libraryId}`)).by, 'actress');
+  assert.equal((await json(`/api/library/groups?by=actress&library_id=${libraryId}`)).all.count, 5, '分组接口返回全部影片汇总');
+  const actressGroup = (await json(`/api/library/groups?by=actress&library_id=${libraryId}`)).groups[0];
+  const groupUrl = `/api/library/films?limit=50&library_id=${libraryId}&group_by=actress&group=${encodeURIComponent(actressGroup.key)}`;
+  assert.equal((await json(groupUrl)).total, actressGroup.count);
+  const studioGroup = (await json(`/api/library/groups?by=studio&library_id=${libraryId}`)).groups.find(group => group.key === '示例片商');
+  const studioUrl = `/api/library/films?limit=50&library_id=${libraryId}&group_by=studio&group=${encodeURIComponent(studioGroup.key)}`;
+  assert.equal((await json(studioUrl)).total, studioGroup.count);
+
+  // 新建媒体库并追加第二个文件夹
+  const created = await json('/api/library/libraries', 'POST', { name: '演示新库', folders: [{ path: '/video/新目录', recursive: true }], scan: false });
+  assert.equal(created.library.name, '演示新库');
+  assert.equal(created.library.folders.length, 1);
+  const added = await json(`/api/library/libraries/${created.library.id}/folders`, 'POST', { path: '/video/另一个目录', scan: false });
+  assert.equal(added.library.folders.length, 2);
+  const removed = await json(`/api/library/libraries/${created.library.id}/folders/${added.folder.id}`, 'DELETE');
+  assert.equal(removed.library.folders.length, 1);
+  await json(`/api/library/libraries/${created.library.id}`, 'DELETE');
+  assert.equal((await json('/api/library/libraries')).libraries.length, 2);
+
+  const target = byId['DEMO-002'];
+  const saved = await json(`/api/library/films/${target.id}`, 'PATCH', { dvdid: 'DEMO-002', title: '手动标题', actress: ['示例演员'], studio: '示例片商', release_date: '2026-10-01', runtime: 120 });
+  assert.equal(saved.film.title, '手动标题');
+  assert.ok(saved.film.nfo_mtime > 0);
+  const nfo = await json(`/api/library/films/${target.id}/nfo`);
+  assert.match(nfo.content, /手动标题/);
+  const scraped = await json(`/api/library/films/${target.id}/scrape`, 'POST', { dvdid: 'DEMO-002' });
+  assert.equal(scraped.film.scrape_state, 'queued');
+  // 封面包图在静态示例中不提供，确认返回可预期的错误而不是崩溃
+  assert.equal((await request(`/api/library/films/${target.id}/cover`)).status, 409);
 });
 
 test('task pagination, filtering and cancellation survive pending timers', async () => {

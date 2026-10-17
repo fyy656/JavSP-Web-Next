@@ -236,7 +236,8 @@ class SummaryFailureTests(unittest.TestCase):
                          progress_enabled=lambda: True,
                          progress_event=lambda stage, **values: events.append((stage, values)),
                          fallback_media_type_id=lambda: 'normal',
-                         parallel_crawler=lambda *args: {'t66y': info}, translate_movie_info=translate)
+                         parallel_crawler=lambda *args: {'t66y': info}, translate_movie_info=translate,
+                         apply_forced_avid=lambda item: item)
         tree = ast.parse((ROOT / 'vendor/JavSP/javsp/__main__.py').read_text(encoding='utf-8'))
         functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
                      and node.name in ('info_summary', 'RunNormalMode')]

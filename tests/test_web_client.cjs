@@ -155,10 +155,11 @@ async function verifyBatchTaskStop() {
   await confirmRun();
   assert.deepEqual(requests[1].body, { ids: ['a', 'b'] }, 'selected stops must send unique IDs');
   assert.equal(context.state.selectedOverviewTasks.size, 0, 'stopped selections must be cleared');
+  // 概览已改为使用看板：批量停止入口仍在（手动刮削在 app.js 生成，概览在 index.html）
   const markup = fs.readFileSync(path.join(__dirname, '../javsp_web/web/assets/app.js'), 'utf8');
-  for (const button of ['id="task-stop-all"', 'id="overview-stop-all"', 'id="overview-cancel-selected"']) {
-    assert.ok(markup.includes(button), `missing stop control ${button}`);
-  }
+  const page = fs.readFileSync(path.join(__dirname, '../javsp_web/web/index.html'), 'utf8');
+  assert.ok(markup.includes('id="task-stop-all"'), 'missing stop control id="task-stop-all"');
+  assert.ok(page.includes('id="overview-stop-all"'), 'missing stop control id="overview-stop-all"');
 }
 
 async function main() {

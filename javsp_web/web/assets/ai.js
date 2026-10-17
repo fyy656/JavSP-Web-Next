@@ -405,7 +405,7 @@
     panel.open = localStorage.getItem('javsp-web.ai-settings-open') !== 'false';
     panel.addEventListener('toggle', () => localStorage.setItem('javsp-web.ai-settings-open', String(panel.open)));
     panel.innerHTML = `<summary><span><strong>AI 接入</strong><small class="muted">模型连接与使用设置</small></span></summary>
-      <p class="muted">使用刮削助手时，模型需要支持工具调用。<a href="https://apecme.github.io/JavSP-Web/docs.html#ai" target="_blank" rel="noopener noreferrer">查看 AI 接入教程 ↗</a></p>
+      <p class="muted">使用刮削助手时，模型需要支持工具调用。<a href="https://fyy656.github.io/JavSP-Web/docs.html#ai" target="_blank" rel="noopener noreferrer">查看 AI 接入教程 ↗</a></p>
       <form id="ai-settings-form" class="stack">
         <details class="ai-setting-group" open><summary>模型接入</summary><div class="stack">
         <label class="check-label"><input id="ai-enabled" type="checkbox">启用 AI 刮削</label>

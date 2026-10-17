@@ -14,17 +14,25 @@
   <link rel="stylesheet" href="subpages.css?v=topics-20261010">
 </head>
 <body class="docs-page">
-  <header class="site-header"><a class="brand" href="index.html" aria-label="JavSP WEB 首页"><img src="assets/javsp-logo.png" alt=""><span>JavSP <b>WEB</b></span></a><button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav">菜单</button><nav id="site-nav" class="site-nav" aria-label="主导航"><a href="index.html">首页</a><a class="is-current" href="docs.html">文档</a><a href="demo.html">示例站点</a><a class="nav-github" href="https://github.com/APecme/JavSP-Web" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a></nav></header>
+  <header class="site-header"><a class="brand" href="index.html" aria-label="JavSP WEB 首页"><img src="assets/javsp-logo.png" alt=""><span>JavSP <b>WEB</b></span></a><button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav">菜单</button><nav id="site-nav" class="site-nav" aria-label="主导航"><a href="index.html">首页</a><a class="is-current" href="docs.html">文档</a><a href="demo.html">示例站点</a><a class="nav-github" href="https://github.com/fyy656/JavSP-Web" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a></nav></header>
   <main class="docs-shell page-width">
-<aside class="doc-nav" aria-label="教程导航"><a class="doc-home-link" href="docs.html">← 教程目录</a><div class="doc-nav-group"><a class="doc-topic-link" href="guide-install.html">安装与部署</a></div><div class="doc-nav-group is-active-topic"><a class="doc-topic-link" href="guide-scraping.html" aria-current="page">刮削与整理</a><a class="doc-chapter-link" href="#manual">手动刮削与任务</a><a class="doc-chapter-link" href="#mounted">挂载盘、STRM 与分 P</a><a class="doc-chapter-link" href="#preset">刮削预设与分类</a><a class="doc-chapter-link" href="#crawlers">爬虫与网络</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-ai.html">AI 助手</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-automation.html">自动化与集成</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-maintenance.html">维护与排错</a></div><a class="doc-demo-link" href="demo.html">打开交互示例 →</a></aside>
+<aside class="doc-nav" aria-label="教程导航"><a class="doc-home-link" href="docs.html">← 教程目录</a><div class="doc-nav-group"><a class="doc-topic-link" href="guide-install.html">安装与部署</a></div><div class="doc-nav-group is-active-topic"><a class="doc-topic-link" href="guide-scraping.html" aria-current="page">刮削与整理</a><a class="doc-chapter-link" href="#library">媒体库：目录索引</a><a class="doc-chapter-link" href="#manual">手动刮削与任务</a><a class="doc-chapter-link" href="#mounted">挂载盘、STRM 与分 P</a><a class="doc-chapter-link" href="#preset">刮削预设与分类</a><a class="doc-chapter-link" href="#crawlers">爬虫与网络</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-ai.html">AI 助手</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-automation.html">自动化与集成</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-maintenance.html">维护与排错</a></div><a class="doc-demo-link" href="demo.html">打开交互示例 →</a></aside>
 <article class="doc-content"><header class="doc-topic-heading"><p class="eyebrow">使用教程 / 02</p><h1>刮削与整理</h1><p class="doc-lede">从单次任务到批量整理，了解预设、分类、分 P 与爬虫之间的关系。</p></header>
+<section id="library"><h2>媒体库：按目录索引自己的影片</h2>
+        <p>媒体库以磁盘上的文件为准：先建一个媒体库（例如“正片”“素人”），再把存放影片的多个文件夹加进去，程序会读取其中的视频、NFO 与封面/剧照，把影片列出来。没有 NFO、没有封面、甚至没有番号的影片也会出现在列表里，方便你发现和处理；扫描本身不移动文件，也不创建刮削任务。</p>
+        <ul><li><b>媒体库与文件夹：</b>顶部按媒体库切换；每个媒体库可以包含多个文件夹，一个文件夹也能加入多个媒体库。新建时选择默认预设，之后可随时改名或改预设。</li><li><b>全部影片：</b>标签栏最前面的“全部影片”跨所有媒体库汇总，用于统一搜索与浏览；它只读，添加文件夹、库设置需要在具体媒体库下操作，扫描会依次扫描全部媒体库。</li><li><b>添加文件夹：</b>填写服务端能访问的路径（Docker 用容器内路径），可选择是否包含子目录，保存后立即扫描该库的全部文件夹。</li><li><b>最小文件大小：</b>扫描遵循该媒体库预设里的“最小匹配文件大小”，更小的文件（例如混入的广告）不会进入索引；如果之前已经被索引，下次扫描会把对应记录移除，而不是标成“文件已丢失”。</li><li><b>扫描：</b>只读取与比对，重复扫描是增量的。源文件被外部删除（或不再符合扫描条件，例如小于最小文件大小）后，下次扫描会把对应记录从媒体库移除；文件夹整体不可访问时（例如移动硬盘未挂载）会跳过清点，不会误删记录。</li><li><b>筛选：</b>顶部统计和状态标签可按“缺资料 / 未刮削 / 刮削失败 / 文件丢失”过滤；搜索支持番号、标题、女优和路径。</li><li><b>分 P：</b>同一影片的多个分片会合并为一张卡，卡片右下角显示文件数量。</li><li><b>移除文件夹：</b>只把索引从这个库里去掉，磁盘文件不会被删除。</li><li><b>分类浏览：</b>选择“按女优 / 按片商 / 按年份”后，右上角可切换“卡片视图”与“列表视图”。卡片视图把每个女优做成封面大卡片，点进去就是她的影片，返回按钮回到分类列表；搜索与排序在这两种视图下同样生效。</li></ul>
+        <h3>补资料、填番号与保存</h3>
+        <p>点开卡片进入详情。资料可直接编辑，保存时会写入同目录的 NFO，已有文件先备份为 <code>.bak</code>；如果 NFO 在此期间被其他程序改过，会提示冲突而不是直接覆盖。没有番号的影片在详情里填写番号后点“保存并刮削”，程序会用这个番号创建单文件任务，<b>不会重命名源文件</b>，也不会扫描整个目录。</p>
+        <p>详情里的“打开文件所在目录”会在本机文件管理器里定位该影片并置前（仅本地部署可用，Docker 部署会提示无法打开宿主机文件夹）。文件名或路径过长时程序会先换成 8.3 短路径再定位，避免资源管理器退回“文档”；确实无法定位时会直接打开所在文件夹。</p>预设开启“整理文件到整理目录”时，刮削成功后文件会移到整理目录，卡片会标记“已整理”，索引自动跟随，不需要手动重扫。</p>
+        <p>任务完成后，媒体库会重新读取该目录的 NFO 与图片来更新卡片；任务失败时保留你手动填写的番号，并显示失败原因，方便直接重试。删掉任务记录不会让影片从媒体库消失，这也是它和“概览”最大的区别。</p>
+      </section>
 <section id="manual"><h2>手动刮削：提交、查看与处理结果</h2>
         <ol><li>进入“手动刮削”，填写文件或目录路径；Docker 使用“浏览容器路径”，Windows 本机可使用文件选择器。</li><li>选定刮削预设，点击“启动 JavSP”。选择目录时，先等待扫描完成，找到的影片会陆续出现在任务队列中。</li><li>在任务队列查看状态、扫描数量和阶段进度。支持按状态、关键词、大小和时间筛选，并分页查看。</li><li>打开“详情”，先看最终结果，再展开数据源和图片日志。单个爬虫失败不代表整个任务失败；以最终是否取得必需资料并完成整理为准。</li></ol>
         <figure class="doc-figure"><a href="assets/guide/manual.webp" target="_blank"><img src="assets/guide/manual.webp" width="1440" height="1050" loading="lazy" alt="手动刮削页面：输入路径、选择预设、查看队列和任务详情"></a><figcaption>填写影片路径、选择预设后启动刮削，下方可查看任务进度（演示数据）。</figcaption></figure>
         <h3>什么时候重试，什么时候处理文件？</h3><ul><li><b>只有图片失败：</b>在任务详情中重试图片；封面还可从任务详情发起搜索、选择候选或上传，不必反复创建整部影片任务。</li><li><b>资料错误：</b>在详情中编辑影片资料并保存；需要同步媒体库时按提示刷新。先核对番号与来源，避免把错误资料写回。</li><li><b>整理目标冲突：</b>检查已有输出文件或剧照目录是否属于完整入库或未完成残留；不要把“删除任务记录”当作清理输出。</li><li><b>停止和删除：</b>运行中的任务先停止再删除。删除记录不会自动撤销整理；可用的“还原”操作依赖该任务保存的整理记录与实际文件状态。</li></ul>
         <h3>封面墙与隐私模式</h3>
-        <p>在“概览 → 我的媒体库”按封面浏览已刮削的影片。同一影片的任务会合并显示，可搜索番号、片名或女优，按刮削时间或发行时间排序、分页浏览，也可批量删除记录。这里展示的是刮削记录中的影片，不会自动扫描整个磁盘。</p>
-        <p>打开“隐私模式”后，封面墙、详情海报和剧照会模糊显示，刷新页面后仍然生效。开关保存在当前浏览器，不影响磁盘上的图片和 Emby / Jellyfin 中的显示。</p>
+        <p>“概览”是使用看板：顶部是任务总数、排队中/运行中、已完成、失败四项统计，下面是最近的任务记录，可展开查看日志、停止或删除任务。影片的浏览与分类请到“媒体库”页，那里以磁盘上的目录为准。</p>
+        <p>“媒体库”工具栏里的“隐私模式”开关会让封面、海报和剧照模糊显示，刷新页面后仍然生效。开关保存在当前浏览器，不影响磁盘上的图片和 Emby / Jellyfin 中的显示。</p>
         <h3>影片评论</h3>
         <p>打开影片详情即可查看同番号的公开评论。点击右上角头像进入“个人中心”，设置用户名和 6 位数字 PIN，即可创建匿名评论身份，无需邮箱或第三方账号。用户名不区分大小写，公开显示为“用户名#四位标识”；同名但 PIN 不同的用户会有不同的标识。</p>
         <p>点击个人头像上的铅笔更换头像。弹窗支持按女优名字搜索，头像去除黑边后居中裁切。普通评论直接发布，疑似广告进入待审核，命中禁用词会提示修改。个人中心可查看自己的待审核、已发布和已隐藏评论。</p>
@@ -59,7 +67,7 @@
       </section>
 <nav class="doc-pager" aria-label="相邻主题"><a href="guide-install.html"><small>上一主题</small>安装与部署 ←</a><a href="guide-ai.html"><small>下一主题</small>AI 助手 →</a></nav></article>
 </main>
-  <footer class="site-footer"><div class="page-width footer-inner"><span>© 2026 APecme · JavSP WEB</span><span>GPL-3.0 / Anti 996 License</span><a href="index.html">返回首页 →</a></div></footer>
+  <footer class="site-footer"><div class="page-width footer-inner"><span>© 2026 fyy656 · JavSP WEB</span><span>GPL-3.0 / Anti 996 License</span><a href="index.html">返回首页 →</a></div></footer>
   <script src="script.js?v=topics-20261010"></script>
 </body>
 </html>

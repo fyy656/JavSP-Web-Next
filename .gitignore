@@ -27,3 +27,7 @@ exe-icon-preview.png
 /tmp/
 /debug.log
 /comments-service/
+
+# IDE and local assistant workspace
+.idea/
+.workbuddy-ai/

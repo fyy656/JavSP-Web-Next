@@ -46,6 +46,18 @@ class TaskStoreTests(unittest.TestCase):
         self.addCleanup(client.close)
         return client
 
+    def test_library_tasks_are_visible_in_the_manual_queue(self):
+        """从媒体库发起的任务也要出现在任务队列里，否则用户看不到它在运行。"""
+        client = self.client()
+        storage.save_tasks([
+            self.item('manual-task', source='manual'),
+            self.item('library-task', status='queued', source='library'),
+        ])
+        page = client.get('/api/tasks', params={'view': 'manual', 'limit': 50}).json()
+        ids = [item['id'] for item in page['items']]
+        self.assertIn('library-task', ids)
+        self.assertIn('manual-task', ids)
+
     def test_json_import_backup_and_deleted_history_does_not_reappear(self):
         record = self.item()
         content = json.dumps([record], ensure_ascii=False)
@@ -622,6 +634,84 @@ class TaskStoreTests(unittest.TestCase):
             with self.assertRaises(StopWorker):
                 tasks._task_worker()
             self.assertEqual(tasks._worker_batches, {})
+
+    def test_batch_delete_removes_records_and_sidecars_and_skips_running(self):
+        configs, logs = self.folder / 'task-config', self.folder / 'task-logs'
+        configs.mkdir(parents=True, exist_ok=True)
+        logs.mkdir(parents=True, exist_ok=True)
+        for task_id in ('a', 'b'):
+            (configs / f'{task_id}.yml').write_text('scanner: {}', encoding='utf-8')
+            (logs / f'{task_id}.log').write_text('raw', encoding='utf-8')
+        storage.save_tasks([self.item('a'), self.item('b'), self.item('run', status='running')])
+        with patch.dict(tasks._processes, {'run': object()}):
+            result = tasks.delete_tasks(['a', 'b', 'run', 'missing'])
+        self.assertEqual(result['deleted'], 2)
+        self.assertEqual({item['id']: item['reason'] for item in result['skipped']},
+                         {'run': 'running', 'missing': 'not_found'})
+        self.assertEqual({item['id'] for item in storage.load_tasks()}, {'run'})
+        for task_id in ('a', 'b'):
+            self.assertFalse((configs / f'{task_id}.yml').exists())
+            self.assertFalse((logs / f'{task_id}.log').exists())
+
+    def test_purge_preview_and_execution_respect_status_age_and_scan_flag(self):
+        old_ok = self.item('old-ok', status='succeeded')
+        old_ok['created_at'] = '2026-01-01T00:00:00+08:00'
+        old_failed = self.item('old-failed', status='failed')
+        old_failed['created_at'] = '2026-01-01T00:00:00+08:00'
+        new_ok = self.item('new-ok', status='succeeded')
+        new_ok['created_at'] = '2026-09-23T00:00:00+08:00'
+        old_scan = self.item('old-scan', status='succeeded', task_type='scan')
+        old_scan['created_at'] = '2026-01-01T00:00:00+08:00'
+        storage.save_tasks([old_ok, old_failed, new_ok, old_scan])
+        preview = tasks.purge_tasks(statuses=['succeeded'], before='2026-06-01T00:00:00Z', dry_run=True)
+        self.assertEqual((preview['matched'], preview['deletable']), (1, 1))
+        self.assertGreater(preview['bytes'], 0)
+        with_scan = tasks.purge_tasks(statuses=['succeeded'], before='2026-06-01T00:00:00Z',
+                                      include_scan=True, dry_run=True)
+        self.assertEqual(with_scan['deletable'], 2)
+        result = tasks.purge_tasks(statuses=['succeeded'], before='2026-06-01T00:00:00Z', dry_run=False)
+        self.assertEqual(result['deleted'], 1)
+        self.assertEqual({item['id'] for item in storage.load_tasks()}, {'old-failed', 'new-ok', 'old-scan'})
+
+    def test_purge_merge_duplicates_keeps_newest_record_per_path(self):
+        shared = str(self.folder / 'same.mp4')
+        records = [self.item('old'), self.item('mid'), self.item('new'), self.item('other')]
+        for record, created in zip(records, ('2026-09-01', '2026-09-02', '2026-09-03', '2026-09-01')):
+            record['created_at'] = f'{created}T00:00:00+08:00'
+        for record in records[:3]:
+            record['input_directory'] = shared
+        storage.save_tasks(records)
+        preview = tasks.purge_tasks(statuses=['succeeded'], merge_duplicates=True, dry_run=True)
+        self.assertEqual((preview['matched'], preview['deletable']), (4, 2))
+        tasks.purge_tasks(statuses=['succeeded'], merge_duplicates=True, dry_run=False)
+        self.assertEqual({item['id'] for item in storage.load_tasks()}, {'new', 'other'})
+
+    def test_ids_and_batch_delete_endpoints_follow_the_current_filter(self):
+        client = self.client()
+        records = [self.item(str(index)) for index in range(3)]
+        records[0]['input_directory'] = 'D:/lib/keep.mp4'
+        records[1]['input_directory'] = 'D:/lib/drop.mp4'
+        records[2]['input_directory'] = 'D:/lib/drop2.mp4'
+        storage.save_tasks(records)
+        payload = client.get('/api/tasks/ids', params={'view': 'manual', 'query': 'drop'}).json()
+        self.assertEqual((payload['total'], set(payload['ids'])), (2, {'1', '2'}))
+        deleted = client.post('/api/tasks/delete', json={'ids': payload['ids']}).json()
+        self.assertEqual(deleted['deleted'], 2)
+        self.assertEqual([item['id'] for item in storage.load_tasks()], ['0'])
+        preview = client.post('/api/tasks/purge', json={'statuses': ['succeeded'], 'dry_run': True}).json()
+        self.assertEqual(preview['deletable'], 1)
+        executed = client.post('/api/tasks/purge', json={'statuses': ['succeeded'], 'dry_run': False}).json()
+        self.assertEqual(executed['deleted'], 1)
+        self.assertEqual(storage.load_tasks(), [])
+
+    def test_ids_endpoint_expands_grouped_overview_records(self):
+        client = self.client()
+        records = [self.item(str(index), image_sources={'cover_urls': ['https://example.test/cover']}) for index in range(3)]
+        for record in records:
+            record['image_output'] = {'save_dir': '/shared', 'fanart_file': '/shared/fanart.jpg'}
+        storage.save_tasks(records)
+        payload = client.get('/api/tasks/ids', params={'view': 'overview'}).json()
+        self.assertEqual((payload['total'], set(payload['ids'])), (3, {'0', '1', '2'}))
 
     def test_bulk_insert_is_atomic(self):
         storage.upsert_task(self.item('existing'))

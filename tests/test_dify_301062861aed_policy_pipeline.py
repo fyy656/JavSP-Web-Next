@@ -92,7 +92,7 @@ class PolicyPipelineTests(unittest.TestCase):
             fallback_media_type_id=lambda: 'normal',
             parallel_crawler=lambda *args: {'stub': object()},
             info_summary=lambda *args: True, generate_names=lambda movie: None,
-            download_cover=download, write_nfo=write)
+            download_cover=download, write_nfo=write, apply_forced_avid=lambda item: item)
         module = ast.Module(body=[copy.deepcopy(self.worker_node)], type_ignores=[])
         exec(compile(module, 'actual-RunNormalMode', 'exec'), namespace)
         with patch.object(datatype, 'progress_event', emit):

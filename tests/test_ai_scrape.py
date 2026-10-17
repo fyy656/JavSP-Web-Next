@@ -108,7 +108,9 @@ class WorkerSelectionTests(unittest.TestCase):
         events = []
         namespace = dict(Cfg=lambda: config, logger=Mock(), tqdm=lambda *args, **kwargs: args[0] if args else Mock(),
                          progress_enabled=lambda: True, progress_event=lambda stage, **values: events.append((stage, values)),
-                         parallel_crawler=crawler, info_summary=summary, fallback_media_type_id=lambda: 'normal', read_proxy=lambda: {})
+                         parallel_crawler=crawler, info_summary=summary, fallback_media_type_id=lambda: 'normal', read_proxy=lambda: {},
+                         # 逐部影片的“外部指定番号”钩子：这里不需要覆盖行为
+                         apply_forced_avid=lambda item: item)
         tree = ast.parse((ROOT / 'vendor/JavSP/javsp/__main__.py').read_text(encoding='utf-8'))
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'RunNormalMode')
         exec(compile(ast.Module(body=[function], type_ignores=[]), 'ai-worker-test', 'exec'), namespace)

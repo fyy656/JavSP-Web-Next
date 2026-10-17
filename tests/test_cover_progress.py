@@ -110,6 +110,7 @@ class CoverProgressTests(unittest.TestCase):
                          progress_enabled=lambda: True,
                          progress_event=lambda stage, **kwargs: events.append((stage, kwargs)),
                          fallback_media_type_id=lambda: 'normal', parallel_crawler=lambda *args: [info],
+                         apply_forced_avid=lambda item: item,
                          info_summary=lambda *args: True, generate_names=lambda *args: None,
                          download_cover=download_cover, process_poster=process_poster, write_nfo=Mock())
         tree = ast.parse((ROOT / 'vendor/JavSP/javsp/__main__.py').read_text(encoding='utf-8'))

@@ -33,7 +33,7 @@ description: Use when a user asks to push JavSP WEB to GitHub, publish a beta/ba
    git log -1 --oneline --decorate
    ```
 
-   `origin` 必须精确匹配以下 HTTPS 或 SSH 写法（仓库名大小写不敏感，可选末尾 `.git`）：`https://github.com/APecme/JavSP-Web`、`git@github.com:APecme/JavSP-Web`、`ssh://git@github.com/APecme/JavSP-Web`。拒绝其他主机、端口、额外路径、查询参数或非 `git` SSH 用户。远端不匹配、当前分支不是 `main`、或分支状态无法解释时停止并报告。不要自行切换分支或改写历史。
+   `origin` 必须精确匹配以下 HTTPS 或 SSH 写法（仓库名大小写不敏感，可选末尾 `.git`）：`https://github.com/fyy656/JavSP-Web`、`git@github.com:fyy656/JavSP-Web`、`ssh://git@github.com/fyy656/JavSP-Web`。拒绝其他主机、端口、额外路径、查询参数或非 `git` SSH 用户。远端不匹配、当前分支不是 `main`、或分支状态无法解释时停止并报告。不要自行切换分支或改写历史。
 
 2. 检查工作区和索引。分别审阅工作区改动、已暂存改动和未跟踪文件：
 

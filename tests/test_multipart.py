@@ -390,7 +390,8 @@ class MultipartTests(unittest.TestCase):
                          info_summary=lambda *args: True, generate_names=lambda *args: None,
                          download_cover=lambda *args, **kwargs: None, download=lambda *args: {},
                          valid_pic=lambda *args: True, get_fmt_size=lambda *args: '1 B',
-                         get_pic_size=lambda *args: (1, 1), write_nfo=Mock())
+                         get_pic_size=lambda *args: (1, 1), write_nfo=Mock(),
+                         apply_forced_avid=lambda item: item)
         exec(compile(ast.Module(body=[function], type_ignores=[]), 'RunNormalMode', 'exec'), namespace)
         return namespace['RunNormalMode']([movie]), events
 

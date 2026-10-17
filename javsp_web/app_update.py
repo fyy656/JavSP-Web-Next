@@ -17,7 +17,7 @@ from . import storage
 from . import app_supervisor
 
 
-API = 'https://api.github.com/repos/APecme/JavSP-Web'
+API = 'https://api.github.com/repos/fyy656/JavSP-Web'
 MAX_ARCHIVE = 100 * 1024 * 1024
 MAX_EXTRACTED = 200 * 1024 * 1024
 REQUIRED = {'Dockerfile', 'requirements.txt', 'javsp_web/server.py', 'javsp_web/app_supervisor.py', 'vendor/JavSP/config.yml'}

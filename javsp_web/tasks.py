@@ -1295,6 +1295,8 @@ def create_task(
     source: str = "manual",
     schedule_id: str | None = None,
     input_files: list[str] | None = None,
+    forced_avid: str | None = None,
+    library_film_id: str | None = None,
     _snapshot: tuple[dict, dict] | None = None,
     _defer: bool = False,
 ) -> dict:
@@ -1330,6 +1332,10 @@ def create_task(
         "source": source,
         "schedule_id": schedule_id,
     }
+    if forced_avid:
+        task["forced_avid"] = str(forced_avid).strip().upper()
+    if library_film_id:
+        task["library_film_id"] = str(library_film_id)
     config_path, preset_name = _build_task_config(task_id, input_directory, preset_id, selected, snapshot)
     task["config_path"] = str(config_path)
     task["preset_id"] = preset_id
@@ -1515,6 +1521,9 @@ def _run_task(task: dict) -> None:
     env["JAVSP_WEB_DATA_DIR"] = str(DATA_DIR.resolve())
     # The embedded worker reports structured events; terminal tqdm redraws are disabled.
     env["JAVSP_PROGRESS"] = "1"
+    if task.get("forced_avid"):
+        env["JAVSP_FORCED_AVID"] = str(task["forced_avid"])
+        env["JAVSP_FORCED_AVID_PATH"] = str(task.get("input_directory") or "")
     cookiecloud_file: Path | None = None
     settings = get_cookiecloud_settings(include_password=True)
     if settings.get("enabled"):
@@ -1615,6 +1624,24 @@ def _run_task(task: dict) -> None:
                 threading.Thread(target=auto_sync_media_servers, name=f"media-sync-{task['id']}", daemon=True).start()
             except ImportError:
                 pass
+        _refresh_library_film(task)
+
+
+def _refresh_library_film(task: dict) -> None:
+    """媒体库发起的任务结束后，按磁盘上的 NFO/图片重建该影片索引。
+
+    媒体库以磁盘为真源，所以这里只做“重新读取”，不依赖任务结果本身；
+    失败只记录日志，不影响任务状态。
+    """
+    film_id = str(task.get("library_film_id") or "")
+    if not film_id:
+        return
+    try:
+        from . import library_store
+
+        library_store.refresh_film_after_task(film_id, task.get("status") or "", task.get("error") or "", task)
+    except Exception as exc:  # noqa: BLE001 - 索引刷新失败不能让任务收尾失败
+        logger.warning("刷新媒体库影片索引失败：%s", exc)
 
 
 def _append_task_event(task: dict, stage: str, **payload: object) -> None:
@@ -2541,3 +2568,94 @@ def clean_task_configs() -> None:
     folder = DATA_DIR / "task-config"
     if folder.exists():
         shutil.rmtree(folder, ignore_errors=True)
+
+
+def _task_sidecar_paths(task_id: str) -> list[Path]:
+    """Per-task files that are derived from the record and must not outlive it."""
+    return [
+        DATA_DIR / "task-config" / f"{task_id}.yml",
+        DATA_DIR / "task-logs" / f"{task_id}.log",
+        DATA_DIR / "task-logs" / f"{task_id}.log.1",
+    ]
+
+
+def _remove_task_sidecars(task_id: str) -> None:
+    for path in _task_sidecar_paths(task_id):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def delete_tasks(task_ids) -> dict:
+    """Delete many records in one database transaction.
+
+    Running tasks are skipped instead of failing the whole batch, so a purge can
+    include a filtered set without first stopping everything.
+    """
+    from . import task_store
+
+    ids_list = [str(item) for item in dict.fromkeys(task_ids) if str(item or "").strip()]
+    if not ids_list:
+        return {"deleted": 0, "skipped": []}
+    with _lock:
+        states = task_store.statuses(ids_list)
+        deletable, skipped = [], []
+        for task_id in ids_list:
+            state = states.get(task_id)
+            if state is None:
+                skipped.append({"id": task_id, "reason": "not_found"})
+            elif task_id in _processes or state == "running":
+                skipped.append({"id": task_id, "reason": "running"})
+            else:
+                deletable.append(task_id)
+        for task_id in deletable:
+            # Prevent image retry / cover search threads from writing the record back.
+            _mark_task_deleted(task_id)
+        deleted = task_store.delete_many(deletable)
+        for task_id in deletable:
+            _logs.pop(task_id, None)
+            _remove_task_sidecars(task_id)
+    return {"deleted": deleted, "skipped": skipped}
+
+
+def purge_tasks(statuses: list[str] | None = None, before: str = "", include_scan: bool = False,
+                merge_duplicates: bool = False, dry_run: bool = True, **filters) -> dict:
+    """Delete records by status/age, optionally collapsing repeated scans of one path."""
+    from . import task_store
+
+    rows = task_store.purge_candidates(statuses or [], before=before, include_scan=include_scan, **filters)
+    candidates = [row for row in rows if row.get("status") not in {"queued", "running"}]
+    skipped_running = len(rows) - len(candidates)
+    if merge_duplicates:
+        kept, seen = set(), set()
+        # Candidates arrive newest first, so the first record per path wins.
+        for row in candidates:
+            key = str(row.get("input_directory") or row.get("id") or "").casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.add(row["id"])
+        candidates = [row for row in candidates if row["id"] not in kept]
+    size = sum(int(row.get("bytes") or 0) for row in candidates)
+    for row in candidates:
+        for path in _task_sidecar_paths(str(row["id"])):
+            try:
+                size += path.stat().st_size
+            except OSError:
+                pass
+    summary = {
+        "matched": len(rows),
+        "deletable": len(candidates),
+        "skipped_running": skipped_running,
+        "bytes": size,
+    }
+    if dry_run:
+        return summary
+    result = delete_tasks([row["id"] for row in candidates])
+    if result["deleted"] >= 200:
+        try:
+            task_store.vacuum()
+        except Exception:
+            logging.exception("清理任务记录后整理数据库失败")
+    return {**summary, "deleted": result["deleted"], "skipped": result["skipped"]}

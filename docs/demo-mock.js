@@ -21,6 +21,44 @@
     progress: { stages: { concurrent: { percent: 100 }, summary: { percent: 100 }, images: { percent: status === 'failed' ? 0 : 100 } }, crawlers: { javdb: '完成' }, crawler_details: {}, metadata: { ...metadata, dvdid: name }, images: { cover_done: 0, cover_status: 'pending', fanart_done: 0, fanart_total: 0, fanart_status: 'pending' } },
   });
   const tasks = [makeTask('DEMO-001'), makeTask('DEMO-002', 'failed')];
+  const demoFolders = [
+    { id: 'demo-folder-a', name: '正片', path: '/video/媒体库/正片', recursive: true, film_count: 3, last_scan_at: now(), scan_status: 'succeeded' },
+    { id: 'demo-folder-b', name: '素人', path: '/video/媒体库/素人', recursive: true, film_count: 2, last_scan_at: now(), scan_status: 'succeeded' },
+  ];
+  const libraryStatsOf = (films) => ({
+    total: films.length,
+    complete: films.filter(film => film.status === 'complete').length,
+    partial: films.filter(film => ['partial', 'conflict'].includes(film.status)).length,
+    unscraped: films.filter(film => film.status === 'unscraped').length,
+    missing: films.filter(film => film.status === 'missing').length,
+    failed: films.filter(film => film.scrape_state === 'failed').length,
+    scraping: films.filter(film => ['queued', 'running'].includes(film.scrape_state)).length,
+  });
+  const libraries = [
+    { id: 'demo-library', name: '全部影片', preset_id: 'default', created_at: now(), last_scan_at: now(), scan_status: 'succeeded', folders: demoFolders },
+    { id: 'demo-library-4k', name: '4K 专区', preset_id: 'default', created_at: now(), last_scan_at: '', scan_status: '', folders: [] },
+  ];
+  const libraryView = (entry) => ({ ...entry, film_count: (entry.folders || []).reduce((sum, folder) => sum + (folder.film_count || 0), 0), stats: libraryStatsOf(libraryFilms.filter(film => (entry.folders || []).some(folder => folder.id === film.root_id))) });
+  const libraryFilm = (dvdid, title, status, extra = {}) => ({
+    id: `demo-film-${dvdid}`, root_id: 'demo-root', dir_path: `/video/媒体库/${dvdid}`, video_path: `/video/媒体库/${dvdid}/${dvdid}.mkv`,
+    files: [`/video/媒体库/${dvdid}/${dvdid}.mkv`], size_bytes: 3_400_000_000, mtime: 0,
+    dvdid, dvdid_source: status === 'unscraped' ? 'filename' : 'nfo', title: status === 'unscraped' ? '' : title,
+    original_title: '', plot: status === 'unscraped' ? '' : '演示资料，未读取真实文件。', release_date: status === 'unscraped' ? '' : '2026-09-30',
+    studio: status === 'unscraped' ? '' : '示例片商', publisher: '', director: '', runtime: status === 'unscraped' ? 0 : 120,
+    actress_text: status === 'unscraped' ? '' : '示例演员', nfo_path: status === 'unscraped' ? '' : `/video/媒体库/${dvdid}/movie.nfo`, nfo_mtime: status === 'unscraped' ? 0 : 1,
+    cover_path: status === 'complete' ? `/video/媒体库/${dvdid}/poster.jpg` : '', fanart_count: status === 'complete' ? 6 : 0, extrafanart_dir: '',
+    status, missing_fields: status === 'complete' ? ['publisher', 'director'] : ['cover', 'title'].filter(field => field !== 'title' || status === 'unscraped'),
+    scrape_state: status === 'failed' ? 'failed' : 'idle', last_task_id: status === 'failed' ? 'demo-task-failed' : '', last_error: status === 'failed' ? '资料汇总失败：所有数据源均未取得必需字段：封面' : '',
+    updated_at: now(), actress: status === 'unscraped' ? [] : ['示例演员'], ...extra,
+  });
+  const libraryFilms = [
+    libraryFilm('DEMO-001', '资料完整的示例影片', 'complete', { root_id: 'demo-folder-a' }),
+    libraryFilm('DEMO-002', '缺少封面的示例影片', 'partial', { root_id: 'demo-folder-a' }),
+    libraryFilm('DEMO-003', '', 'unscraped', { root_id: 'demo-folder-a' }),
+    libraryFilm('DEMO-004', '刮削失败的示例影片', 'failed', { root_id: 'demo-folder-b' }),
+    libraryFilm('DEMO-005', '文件已丢失的示例影片', 'missing', { root_id: 'demo-folder-b' }),
+  ];
+  const libraryStats = (films = libraryFilms) => libraryStatsOf(films);
   const presets = [{ id: 'default', name: '默认预设', mode: 'form', form_values: copy(seed.config), content: seed.config_yaml, task_concurrency: 1 }];
   let settings = copy(seed.ai);
   let skills = copy(seed.skills);
@@ -119,6 +157,107 @@
       else if (method === 'DELETE') { conversations.splice(conversations.indexOf(conversation), 1); return json({ ok: true }); }
       return json(publicConversation(conversation));
     }
+    if (path === '/api/library/libraries') {
+      if (method === 'POST') {
+        const entry = {
+          id: id(), name: body.name || '示例媒体库', preset_id: body.preset_id || 'default',
+          created_at: now(), last_scan_at: now(), scan_status: 'succeeded', folders: [],
+        };
+        (body.folders || []).forEach(folder => {
+          const created = { id: id(), name: String(folder.path || '').split(/[\\/]/).filter(Boolean).pop() || '文件夹', path: folder.path || '/video/示例', recursive: folder.recursive !== false, film_count: 0, last_scan_at: now(), scan_status: 'succeeded' };
+          entry.folders.push(created);
+        });
+        libraries.push(entry);
+        return json({ library: libraryView(entry), scan: entry.folders.length ? { id: id(), status: 'succeeded', discovered: 0, added: 0, updated: 0, removed: 0 } : null }, 201);
+      }
+      return json({ libraries: libraries.map(libraryView) });
+    }
+    if (path.startsWith('/api/library/libraries/')) {
+      const parts = path.split('/');
+      const library = libraries.find(item => item.id === parts[4]);
+      if (!library) return json({ detail: '媒体库不存在' }, 404);
+      if (parts.length === 6 && parts[5] === 'scan' && method === 'POST') {
+        return json({ scan: { id: id(), status: 'succeeded', discovered: libraryFilms.filter(film => library.folders.some(folder => folder.id === film.root_id)).length, added: 0, updated: 0, removed: 0 } }, 202);
+      }
+      if (parts.length === 6 && parts[5] === 'folders') {
+        if (method !== 'POST') return denied();
+        const folder = { id: id(), name: body.name || String(body.path || '').split(/[\\/]/).filter(Boolean).pop() || '文件夹', path: body.path || '/video/示例', recursive: body.recursive !== false, film_count: 0, last_scan_at: now(), scan_status: 'succeeded' };
+        library.folders.push(folder);
+        return json({ folder, library: libraryView(library), scan: { id: id(), status: 'succeeded', discovered: 0, added: 0, updated: 0, removed: 0 } }, 201);
+      }
+      if (parts.length === 7 && parts[5] === 'folders') {
+        if (method !== 'DELETE') return denied();
+        const index = library.folders.findIndex(folder => folder.id === parts[6]);
+        if (index < 0) return json({ detail: '该媒体库里没有这个文件夹' }, 404);
+        library.folders.splice(index, 1);
+        return json({ ok: true, library: libraryView(library) });
+      }
+      if (method === 'DELETE') { libraries.splice(libraries.indexOf(library), 1); return json({ ok: true }); }
+      if (method === 'PUT') {
+        if (body.name) library.name = body.name;
+        if (body.preset_id) library.preset_id = body.preset_id;
+        return json({ library: libraryView(library) });
+      }
+      return json({ library: libraryView(library) });
+    }
+    if (path.startsWith('/api/library/scans/')) return json({ scan: { id: id(), status: 'succeeded', discovered: libraryFilms.length, added: 0, updated: 0, removed: 0 } });
+    if (path.startsWith('/api/library/groups')) {
+      const by = url.searchParams.get('by') || 'actress';
+      const library = libraries.find(item => item.id === (url.searchParams.get('library_id') || ''));
+      const scope = library ? libraryFilms.filter(film => library.folders.some(folder => folder.id === film.root_id)) : libraryFilms;
+      const groups = new Map();
+      scope.forEach(film => {
+        const key = by === 'actress' ? (film.actress?.[0] || '') : by === 'studio' ? (film.studio || '') : (film.release_date || '').slice(0, 4);
+        const group = groups.get(key) || { key, name: key || '未知', count: 0, covers: [] };
+        group.count += 1;
+        if (film.cover_path) group.covers.unshift({ id: film.id, v: film.updated_at });
+        groups.set(key, group);
+      });
+      const allCovers = scope.filter(film => film.cover_path).map(film => ({ id: film.id, v: film.updated_at }));
+      return json({ by, groups: [...groups.values()], total: scope.length, all: { count: scope.length, covers: allCovers }, stats: libraryStats(scope) });
+    }
+    if (path === '/api/library/films/scrape') return json({ accepted: [], skipped: [] }, 202);
+    if (path === '/api/library/films') {
+      const status = url.searchParams.get('status') || '';
+      const query = (url.searchParams.get('query') || '').toLowerCase();
+      const groupBy = url.searchParams.get('group_by') || '';
+      const group = url.searchParams.get('group') || '';
+      const libraryId = url.searchParams.get('library_id') || '';
+      const folderId = url.searchParams.get('folder_id') || '';
+      const library = libraries.find(item => item.id === libraryId);
+      let items = [...libraryFilms];
+      if (folderId) items = items.filter(film => film.root_id === folderId);
+      else if (library) items = items.filter(film => library.folders.some(folder => folder.id === film.root_id));
+      if (status && status !== 'all') items = items.filter(film => status === 'partial' ? ['partial', 'conflict'].includes(film.status) : status === 'failed' ? film.scrape_state === 'failed' : film.status === status);
+      if (groupBy) {
+        const value = film => groupBy === 'actress' ? ((film.actress || [])[0] || '') : groupBy === 'studio' ? (film.studio || '') : (film.release_date || '').slice(0, 4);
+        items = items.filter(film => value(film) === group);
+      }
+      if (query) items = items.filter(film => JSON.stringify([film.dvdid, film.title, film.actress, film.video_path]).toLowerCase().includes(query));
+      const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 48);
+      return json({ items: items.slice(offset, offset + limit), total: items.length, limit, offset, stats: libraryStats(items) });
+    }
+    if (path.startsWith('/api/library/films/')) {
+      const film = libraryFilms.find(item => item.id === path.split('/')[4]);
+      if (!film) return json({ detail: '影片不存在' }, 404);
+      if (path.endsWith('/nfo')) {
+        if (method === 'PUT') { film.nfo_mtime = (film.nfo_mtime || 0) + 1; return json({ film, nfo: { content: body.content, path: `${film.dir_path}/movie.nfo`, mtime: film.nfo_mtime } }); }
+        return json({ content: `<movie><title>${film.title}</title><uniqueid type="num">${film.dvdid}</uniqueid></movie>`, path: `${film.dir_path}/movie.nfo`, mtime: film.nfo_mtime || 0 });
+      }
+      if (path.endsWith('/scrape')) {
+        if (method !== 'POST') return denied();
+        film.scrape_state = 'queued';
+        return json({ task_id: id(), film }, 202);
+      }
+      if (path.endsWith('/cover')) return denied();
+      if (method === 'PATCH') {
+        Object.assign(film, { dvdid: (body.dvdid || '').toUpperCase(), title: body.title || '', original_title: body.original_title || '', plot: body.plot || '', release_date: body.release_date || '', studio: body.studio || '', publisher: body.publisher || '', director: body.director || '', runtime: Number(body.runtime) || 0, actress: body.actress || [], nfo_mtime: (film.nfo_mtime || 0) + 1, updated_at: now() });
+        film.status = film.dvdid && film.title && film.cover_path ? 'complete' : (film.dvdid || film.title ? 'partial' : 'unscraped');
+        return json({ film });
+      }
+      return json({ film });
+    }
+
     if (path === '/api/tasks' && method === 'POST') {
       const task = makeTask((body.input_directory || 'DEMO-003').split(/[\\/]/).pop().replace(/\.[^.]+$/, '') || 'DEMO-003', 'queued');
       task.input_directory = body.input_directory;
