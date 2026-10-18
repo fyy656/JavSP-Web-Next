@@ -48,7 +48,12 @@
   const appState = () => (typeof window !== 'undefined' ? window.JavspState || null : null);
   const isAdmin = () => appState()?.user?.role === 'admin';
   // 容器部署运行在另一台机器上，无法打开浏览器所在电脑的文件夹
-  const canReveal = () => !appState()?.runtime?.docker;
+  // 只有跑在服务端主机上的浏览器才显示“打开文件所在目录”：
+  // 局域网其它设备点击会让服务端主机弹出文件管理器，必须隐藏（服务端也会 403）。
+  const canReveal = () => {
+    const runtime = appState()?.runtime;
+    return Boolean(runtime) && !runtime.docker && runtime.local_client === true;
+  };
 
   function el(id) {
     return document.getElementById(id);

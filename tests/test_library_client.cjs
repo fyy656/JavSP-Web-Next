@@ -430,7 +430,7 @@ async function main() {
     const filmData = film();
     const local = boot({
       routes: { '/api/library/films/f-1': { film: filmData }, '/api/library/films/f-1/nfo': { content: '', path: '', mtime: 0 } },
-      runtime: { docker: false },
+      runtime: { docker: false, local_client: true },
     });
     await local.library.open('f-1');
     const markup = local.element('library-film-content').innerHTML;
@@ -438,10 +438,19 @@ async function main() {
 
     const container = boot({
       routes: { '/api/library/films/f-1': { film: filmData }, '/api/library/films/f-1/nfo': { content: '', path: '', mtime: 0 } },
-      runtime: { docker: true },
+      runtime: { docker: true, local_client: true },
     });
     await container.library.open('f-1');
     assert.doesNotMatch(container.element('library-film-content').innerHTML, /data-lib-reveal/);
+
+    // 局域网其它设备：即使不是 Docker 也不能显示（点了会让主机弹窗）
+    const remote = boot({
+      routes: { '/api/library/films/f-1': { film: filmData }, '/api/library/films/f-1/nfo': { content: '', path: '', mtime: 0 } },
+      runtime: { docker: false, local_client: false },
+    });
+    await remote.library.open('f-1');
+    assert.doesNotMatch(remote.element('library-film-content').innerHTML, /data-lib-reveal/,
+      '非本机客户端不应出现“打开文件所在目录”');
 
     local.calls.length = 0;
     const button = makeElement();

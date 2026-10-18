@@ -599,6 +599,25 @@ class LibraryApiTests(unittest.TestCase):
         config = yaml.safe_load((self.root / 'state' / 'task-config' / f'{task_id}.yml').read_text(encoding='utf-8'))
         self.assertEqual(config['summarizer']['nfo']['basename_pattern'], 'CONF-003')
 
+    def test_reveal_is_rejected_for_non_local_clients(self):
+        """局域网其它设备不能触发宿主机弹文件管理器。"""
+        library = self.create_library()
+        film = self.film_by_dvdid('ABC-123')
+        calls = []
+        with patch.object(self.server, '_is_local_client', return_value=False), \
+                patch.object(self.server.subprocess, 'Popen', side_effect=lambda *a, **k: calls.append(a)):
+            response = self.client.post(f'/api/library/films/{film["id"]}/reveal')
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(calls, [], '非本机请求不应启动任何进程')
+
+    def test_runtime_reports_local_client(self):
+        """运行时信息要告诉前端：当前浏览器是否在服务端主机上。"""
+        with patch.object(self.server, '_is_local_client', return_value=False):
+            remote = self.client.get('/api/runtime').json()
+        self.assertFalse(remote['local_client'])
+        local = self.client.get('/api/runtime').json()
+        self.assertTrue(local['local_client'], '测试客户端默认视为本机')
+
     def test_search_is_case_insensitive(self):
         library = self.create_library()
         for needle in ('def-456', 'DEF-456', 'Def-456'):

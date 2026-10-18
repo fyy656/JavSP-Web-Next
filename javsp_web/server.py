@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import os
 import re
 import json
@@ -129,6 +130,23 @@ async def disable_asset_cache(request, call_next):
 app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 app.mount("/google-browser", StaticFiles(directory=NOVNC_DIR, check_dir=False), name="google-browser")
 IS_DOCKER = Path("/.dockerenv").exists() or os.environ.get("JAVSP_WEB_DOCKER") == "1"
+
+# 只有来自本机的请求才能操作宿主机的窗口/文件管理器
+_LOCAL_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def _is_local_client(request: Request) -> bool:
+    """请求是否来自运行服务的这台机器（局域网客户端一律视为非本机）。"""
+    client = getattr(request, "client", None)
+    host = str(getattr(client, "host", "") or "")
+    if not host:
+        return False
+    if host in _LOCAL_CLIENT_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 CONTAINER_BROWSE_ROOT = Path("/")
 VIDEO_EXTENSIONS = {".3gp", ".avi", ".f4v", ".flv", ".iso", ".m2ts", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".rm", ".rmvb", ".ts", ".vob", ".webm", ".wmv", ".strm", ".mpg"}
 _auto_scrape_run_lock = threading.RLock()
@@ -351,10 +369,11 @@ class UpdateSettingsBody(BaseModel):
 
 
 @app.get("/api/runtime")
-def runtime(_: dict = Depends(current_user)) -> dict:
+def runtime(request: Request, _: dict = Depends(current_user)) -> dict:
     from .ai import settings as ai_settings
     config = ai_settings()
-    return {"deployment": "docker" if IS_DOCKER else ("exe" if IS_FROZEN else "python"), "docker": IS_DOCKER, "version": _display_version(), "app_version": _app_version(), "timezone": timezone_name(), "ai_enabled": config["enabled"], "comments_url": COMMENTS_URL}
+    # local_client 告诉前端：这台浏览器是否跑在服务端主机上（决定是否显示“打开文件所在目录”这类本机操作）
+    return {"deployment": "docker" if IS_DOCKER else ("exe" if IS_FROZEN else "python"), "docker": IS_DOCKER, "local_client": _is_local_client(request), "version": _display_version(), "app_version": _app_version(), "timezone": timezone_name(), "ai_enabled": config["enabled"], "comments_url": COMMENTS_URL}
 
 
 @app.get("/api/update")
@@ -2888,8 +2907,10 @@ def _reveal_in_file_manager(target: Path) -> Path:
 
 
 @app.post("/api/library/films/{film_id}/reveal")
-def reveal_library_film(film_id: str, _: dict = Depends(current_user)) -> dict:
-    """打开影片所在目录。路径来自索引，不接受任意路径；容器部署无法打开宿主机。"""
+def reveal_library_film(film_id: str, request: Request, _: dict = Depends(current_user)) -> dict:
+    """打开影片所在目录。路径来自索引，不接受任意路径；只允许本机调用。"""
+    if not _is_local_client(request):
+        raise HTTPException(status_code=403, detail="只有运行服务的主机才能打开文件管理器")
     film = _library_film_or_404(film_id, reconcile=False)
     if IS_DOCKER:
         raise HTTPException(status_code=400, detail="容器部署无法打开宿主机的文件夹，请在宿主机上打开对应路径")
