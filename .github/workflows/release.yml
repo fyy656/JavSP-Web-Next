@@ -60,7 +60,23 @@ jobs:
           load: true
           tags: javsp-web:verify
       - name: Verify scraping regressions in candidate image
-        run: docker run --rm -v "$PWD/tests:/app/tests:ro" javsp-web:verify sh -c "python -m pip install -r tests/requirements.txt && python -m unittest discover -s tests -v"
+        shell: bash
+        run: |
+          set -o pipefail
+          docker run --rm -v "$PWD/tests:/app/tests:ro" javsp-web:verify \
+            sh -c "python -m pip install -r tests/requirements.txt && python -m unittest discover -s tests -v" \
+            2>&1 | tee /tmp/unittest.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            # 把失败用例写成 annotation，便于在页面/接口直接看到名字
+            grep -E "^(ERROR|FAIL):" /tmp/unittest.log | head -8 | while IFS= read -r line; do
+              echo "::error title=unittest::$line"
+            done
+            tail -n 40 /tmp/unittest.log | grep -E "Error|error|Traceback" | head -8 | while IFS= read -r line; do
+              echo "::error title=unittest detail::$line"
+            done
+            exit "$status"
+          fi
       - name: Verify supervised web startup
         shell: bash
         run: |
