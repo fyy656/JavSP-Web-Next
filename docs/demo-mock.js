@@ -216,7 +216,18 @@
       const allCovers = scope.filter(film => film.cover_path).map(film => ({ id: film.id, v: film.updated_at }));
       return json({ by, groups: [...groups.values()], total: scope.length, all: { count: scope.length, covers: allCovers }, stats: libraryStats(scope) });
     }
-    if (path === '/api/library/films/scrape') return json({ accepted: [], skipped: [] }, 202);
+    if (path === '/api/library/films/scrape') {
+      let targets = Array.isArray(body.ids) && body.ids.length ? body.ids : [];
+      if (!targets.length) {
+        let scope = [...libraryFilms];
+        const library = libraries.find(item => item.id === (body.library_id || ''));
+        if (library) scope = scope.filter(film => library.folders.some(folder => folder.id === film.root_id));
+        if (body.status && body.status !== 'all') scope = scope.filter(film => body.status === 'failed' ? film.scrape_state === 'failed' : film.status === body.status);
+        targets = scope.map(film => film.id);
+      }
+      targets.forEach(id => { const film = libraryFilms.find(item => item.id === id); if (film) film.scrape_state = 'queued'; });
+      return json({ accepted: targets.map(() => 'demo-task'), skipped: [], total: targets.length }, 202);
+    }
     if (path === '/api/library/films') {
       const status = url.searchParams.get('status') || '';
       const query = (url.searchParams.get('query') || '').toLowerCase();
@@ -225,17 +236,19 @@
       const libraryId = url.searchParams.get('library_id') || '';
       const folderId = url.searchParams.get('folder_id') || '';
       const library = libraries.find(item => item.id === libraryId);
-      let items = [...libraryFilms];
-      if (folderId) items = items.filter(film => film.root_id === folderId);
-      else if (library) items = items.filter(film => library.folders.some(folder => folder.id === film.root_id));
-      if (status && status !== 'all') items = items.filter(film => status === 'partial' ? ['partial', 'conflict'].includes(film.status) : status === 'failed' ? film.scrape_state === 'failed' : film.status === status);
+      // 统计跟随媒体库/文件夹/分类/搜索，但不受“只看某状态”影响（状态本身是统计维度）
+      let scope = [...libraryFilms];
+      if (folderId) scope = scope.filter(film => film.root_id === folderId);
+      else if (library) scope = scope.filter(film => library.folders.some(folder => folder.id === film.root_id));
       if (groupBy) {
         const value = film => groupBy === 'actress' ? ((film.actress || [])[0] || '') : groupBy === 'studio' ? (film.studio || '') : (film.release_date || '').slice(0, 4);
-        items = items.filter(film => value(film) === group);
+        scope = scope.filter(film => value(film) === group);
       }
-      if (query) items = items.filter(film => JSON.stringify([film.dvdid, film.title, film.actress, film.video_path]).toLowerCase().includes(query));
+      if (query) scope = scope.filter(film => JSON.stringify([film.dvdid, film.title, film.actress, film.video_path]).toLowerCase().includes(query));
+      let items = scope;
+      if (status && status !== 'all') items = items.filter(film => status === 'partial' ? ['partial', 'conflict'].includes(film.status) : status === 'failed' ? film.scrape_state === 'failed' : film.status === status);
       const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 48);
-      return json({ items: items.slice(offset, offset + limit), total: items.length, limit, offset, stats: libraryStats(items) });
+      return json({ items: items.slice(offset, offset + limit), total: items.length, limit, offset, stats: libraryStats(scope) });
     }
     if (path.startsWith('/api/library/films/')) {
       const film = libraryFilms.find(item => item.id === path.split('/')[4]);

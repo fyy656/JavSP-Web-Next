@@ -6,6 +6,8 @@
  */
 (() => {
   const LIMIT = 48;
+  // 分类卡片一次渲染多少个：637 个女优时全量 DOM 会明显卡顿
+  const GROUP_PAGE = 60;
   // 顶部标签里虚拟的“全部影片”（跨所有媒体库汇总）
   const ALL_LIBRARY = '__all__';
   const STATUS = {
@@ -15,6 +17,12 @@
     missing: { label: '文件已丢失', tone: 'danger' },
     conflict: { label: '资料有冲突', tone: 'warning' },
   };
+  const REQUIRED_LABELS = {
+    dvdid: '番号', cid: 'CID', url: 'URL', cover: '封面', big_cover: '高清封面', title: '标题',
+    plot: '剧情', genre: '类型', score: '评分', ori_title: '原始标题', magnet: '下载链接',
+    serial: '系列', actress: '演员', director: '导演', duration: '时长', producer: '制作商',
+    publisher: '发行商', publish_date: '发行日期', preview_pics: '剧照', preview_video: '预告片',
+  };
   const MISSING_LABELS = {
     dvdid: '番号', title: '标题', cover: '封面', actress: '女优',
     studio: '片商', release_date: '发行日期',
@@ -23,14 +31,16 @@
   const GROUP_MODE_KEY = 'javsp-web.library-group-mode';
   const readGroupMode = () => {
     try {
-      return localStorage.getItem(GROUP_MODE_KEY) === 'cards' ? 'cards' : 'chips';
+      // 默认卡片视图：选了分类直接看封面大卡，比一整面标签更直观
+      return localStorage.getItem(GROUP_MODE_KEY) === 'chips' ? 'chips' : 'cards';
     } catch (_) {
-      return 'chips';
+      return 'cards';
     }
   };
   const state = {
     libraries: [], activeLibraryId: '', films: [], total: 0, stats: {}, offset: 0,
     status: 'all', query: '', sort: 'updated', groupBy: '', group: null, groupMode: readGroupMode(), groups: [],
+    groupsVisible: GROUP_PAGE, librariesFresh: false,
     allCount: 0, allCovers: [],
     loading: false, loaded: false, active: null, nfo: null, pollTimer: null, busy: false,
   };
@@ -164,13 +174,19 @@
 
   function groupsMarkup() {
     if (!state.groupBy) return '';
-    const items = state.groups.map((group) => {
+    const visibleChips = state.groups.slice(0, Math.max(GROUP_PAGE, state.groupsVisible || GROUP_PAGE));
+    const items = visibleChips.map((group) => {
       const active = state.group !== null && group.key === state.group;
       return `<button class="lib-group${active ? ' active' : ''}" type="button" data-lib-group="${escape(group.key)}" aria-pressed="${active}">`
         + `${escape(groupLabel(group))}<span>${group.count}</span></button>`;
     });
     const allActive = state.group === null;
-    return `<button class="lib-group${allActive ? ' active' : ''}" type="button" data-lib-group="__all__" aria-pressed="${allActive}">全部<span>${state.total}</span></button>` + items.join('');
+    const remaining = state.groups.length - visibleChips.length;
+    const more = remaining > 0
+      ? `<button class="lib-group lib-group-more" type="button" id="library-groups-more">显示更多（${remaining}）</button>`
+      : '';
+    return `<button class="lib-group${allActive ? ' active' : ''}" type="button" data-lib-group="__all__" aria-pressed="${allActive}">全部<span>${state.total}</span></button>`
+      + items.join('') + more;
   }
 
   // 与概览页一致的 16:9 封面拼贴模板（lc-* 类来自 cinema.css），只是封面走媒体库接口
@@ -222,15 +238,20 @@
     }
     const english = GROUP_ENGLISH[state.groupBy] || 'GROUP';
     const label = { actress: '女优', studio: '片商', year: '年份' }[state.groupBy] || '分类';
-    const cards = state.groups.map((group) => {
+    const visible = state.groups.slice(0, Math.max(GROUP_PAGE, state.groupsVisible || GROUP_PAGE));
+    const cards = visible.map((group) => {
       const name = groupLabel(group);
       return `<button type="button" class="lc-library-card" data-lib-group-card="${escape(group.key)}" aria-label="查看 ${escape(name)} 的影片">`
         + groupCoverMarkup(group, english)
         + `<span class="lc-library-meta"><strong title="${escape(name)}">${escape(name)}</strong><small><i></i>${group.count} 部影片</small></span>`
         + '</button>';
     });
+    const remaining = state.groups.length - visible.length;
+    const more = remaining > 0
+      ? `<div class="lc-groups-more"><button class="button secondary" type="button" id="library-groups-more">显示更多分类（剩余 ${remaining}）</button></div>`
+      : '';
     return `<div class="lc-section-head"><h3>按${escape(label)}浏览</h3><span>${state.groups.length} 个分类 · ${state.total} 部影片</span></div>`
-      + `<div class="lc-library-grid">${cards.join('')}</div>`;
+      + `<div class="lc-library-grid">${cards.join('')}</div>` + more;
   }
 
   function groupNavMarkup() {
@@ -263,7 +284,7 @@
         <span class="lib-title" title="${escape(film.title)}">${escape(title)}</span>
         <small class="lib-meta">${escape(meta)}</small>
       </div>
-      <div class="lib-actions">${action}<button class="button small" type="button" data-lib-open="${escape(film.id)}">详情</button></div>
+      <div class="lib-actions">${action}<button class="button small" type="button" data-lib-open="${escape(film.id)}" title="编辑番号等资料">资料</button></div>
     </article>`;
   }
 
@@ -327,6 +348,11 @@
     }
     const scanButton = el('library-scan');
     if (scanButton) scanButton.disabled = !hasLibraries;
+    const batchButton = el('library-batch-scrape');
+    if (batchButton) {
+      batchButton.disabled = !hasLibraries || !state.activeLibraryId || !state.total;
+      batchButton.title = `把当前筛选的 ${state.total} 部影片加入刮削队列`;
+    }
     const addFolder = el('library-add-folder');
     if (addFolder) addFolder.hidden = !isAdmin() || !hasLibraries || libraryIsAll();
     const settings = el('library-settings');
@@ -361,6 +387,10 @@
     state.groups = payload.groups || [];
     state.allCount = Number(payload.all?.count ?? 0);
     state.allCovers = payload.all?.covers || [];
+    state.groupsVisible = GROUP_PAGE;
+    // 分类视图不请求影片墙，统计和总数直接用分组接口的结果
+    if (payload.stats) state.stats = payload.stats;
+    if (payload.all?.count !== undefined) state.total = Number(payload.all.count);
     // 搜索会过滤分组列表，此时分组暂时缺席是正常的，不要清掉已选分组
     const known = state.group === '__all__' || state.groups.some((item) => item.key === state.group);
     if (state.group !== null && !state.query && !known) state.group = null;
@@ -385,15 +415,21 @@
     state.offset = state.films.length;
   }
 
-  async function load({ keepGroup = false } = {}) {
+  function browsingGroups() {
+    // 选了分类但还没点进具体某一项：主内容是分类，不需要影片墙
+    return Boolean(state.groupBy) && state.group === null;
+  }
+
+  async function load({ keepGroup = false, refreshLibraries = true } = {}) {
     if (state.loading) return;
     state.loading = true;
     message('正在读取媒体库…');
     try {
-      await loadLibraries();
+      if (refreshLibraries) await loadLibraries();
       if (!keepGroup) state.group = null;
       await loadGroups();
-      await loadFilms();
+      if (!browsingGroups()) await loadFilms();
+      else state.films = [];
       state.loaded = true;
       message('');
       render();
@@ -408,7 +444,11 @@
     try {
       await loadLibraries();
       await loadGroups();
-      await loadFilms({ limit: Math.min(200, Math.max(LIMIT, state.films.length)) });
+      if (browsingGroups()) {
+        state.films = [];
+      } else {
+        await loadFilms({ limit: Math.min(200, Math.max(LIMIT, state.films.length)) });
+      }
       render();
     } catch (error) {
       message(error.message);
@@ -425,7 +465,7 @@
     const search = el('library-page-search');
     if (search) search.value = '';
     message('');
-    await load({ keepGroup: true });
+    await load({ keepGroup: true, refreshLibraries: false });
   }
 
   // ------------------------------------------------------------------ 扫描
@@ -464,6 +504,74 @@
     } finally {
       if (button) button.disabled = false;
     }
+  }
+
+  async function presetRequiredKeys(presetId) {
+    try {
+      const presets = await api('/api/presets');
+      const preset = (presets || []).find((item) => item.id === presetId);
+      const keys = (((preset || {}).form || {}).crawler || {}).required_keys || [];
+      return keys.map((key) => REQUIRED_LABELS[key] || key);
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function scopeDescription() {
+    const library = activeLibrary();
+    const parts = [libraryIsAll() ? '全部影片' : (library ? library.name : '当前媒体库')];
+    if (state.status && state.status !== 'all') {
+      const label = { complete: '资料完整', partial: '缺资料', unscraped: '未刮削', failed: '刮削失败', missing: '文件丢失' }[state.status];
+      parts.push(label ? `只看「${label}」` : state.status);
+    }
+    if (state.query) parts.push(`搜索“${state.query}”`);
+    if (state.groupBy && state.group !== null) {
+      const current = state.groups.find((group) => group.key === state.group);
+      const name = current ? groupLabel(current) : (state.group || '未知');
+      parts.push(`分类：${name}`);
+    }
+    return parts.join(' · ');
+  }
+
+  async function batchScrape() {
+    if (!state.activeLibraryId) return;
+    if (!state.total) {
+      showToast('当前筛选没有可刮削的影片', 'danger');
+      return;
+    }
+    const library = activeLibrary();
+    const presetId = library ? library.preset_id : '';
+    const required = await presetRequiredKeys(presetId);
+    const requiredText = required.length
+      ? `当前预设必须取得：${required.join('、')}；抓不到这些字段的任务会失败。`
+      : '当前预设没有设置“必须取得的资料”。';
+    confirmAction({
+      title: '批量刮削',
+      text: `将把「${scopeDescription()}」共 ${state.total} 部影片加入刮削队列。`
+        + '已标记“资料完整”的影片同样会入队，用于补齐 NFO 里缺的字段（例如女优）；'
+        + '引擎会重写 NFO，但程序会把原有字段补回，不会丢资料。'
+        + requiredText,
+      confirmLabel: '开始刮削',
+      run: async () => {
+        const payload = {
+          library_id: libraryIsAll() ? '' : state.activeLibraryId,
+          status: state.status === 'all' ? '' : state.status,
+          query: state.query,
+          group_by: state.groupBy && state.group !== null ? state.groupBy : '',
+          group: state.groupBy && state.group !== null ? state.group : '',
+          preset_id: presetId || undefined,
+        };
+        try {
+          const result = await api('/api/library/films/scrape', { method: 'POST', body: JSON.stringify(payload) });
+          const accepted = (result.accepted || []).length;
+          const skipped = (result.skipped || []).length;
+          showToast(skipped ? `已加入 ${accepted} 个任务，跳过 ${skipped} 个` : `已加入 ${accepted} 个刮削任务`);
+          await refresh();
+        } catch (error) {
+          showToast(error.message || '批量刮削失败', 'danger');
+        }
+      },
+    });
   }
 
   // ------------------------------------------------------------------ 媒体库与文件夹
@@ -829,6 +937,17 @@
       deleteLibrary();
       return;
     }
+    if (event.target.closest('#library-groups-more')) {
+      event.preventDefault();
+      state.groupsVisible = (state.groupsVisible || GROUP_PAGE) + GROUP_PAGE;
+      render();
+      return;
+    }
+    if (event.target.closest('#library-batch-scrape')) {
+      event.preventDefault();
+      batchScrape();
+      return;
+    }
     if (event.target.closest('#library-scan')) {
       scan();
       return;
@@ -935,6 +1054,7 @@
     if (event.target.id === 'library-group') {
       state.groupBy = event.target.value;
       state.group = null;
+      state.groupsVisible = GROUP_PAGE;
       state.offset = 0;
       refresh();
     }
@@ -972,6 +1092,7 @@
     addFolder,
     removeFolder,
     selectLibrary,
+    batchScrape,
     // 纯函数，供离线测试使用
     internals: { cardMarkup, statsMarkup, filterParams, detailMarkup, state, toneFor, tabsMarkup, foldersMarkup, groupCardsMarkup, groupCoverMarkup },
 

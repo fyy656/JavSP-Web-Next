@@ -287,6 +287,306 @@ class LibraryApiTests(unittest.TestCase):
         self.wait_scan(scan['id'])
         self.assertEqual(self.films(library_id=library['id'], limit=200)['total'], 4)
 
+    def test_batch_scrape_follows_the_current_filter(self):
+        """批量刮削按当前筛选范围入队：只看“缺资料”时只入队这些影片。"""
+        library = self.create_library()
+        unscraped_before = self.films(folder_id='', library_id=library['id'])['stats']
+        partial = self.films(library_id=library['id'], status='partial')
+        self.assertGreater(partial['total'], 0)
+        response = self.client.post('/api/library/films/scrape',
+                                    json={'library_id': library['id'], 'status': 'partial'})
+        self.assertEqual(response.status_code, 202, response.text)
+        payload = response.json()
+        self.assertEqual(len(payload['accepted']), partial['total'])
+        self.assertEqual(payload['total'], partial['total'])
+        for task_id in payload['accepted']:
+            task = tasks.get_task(task_id)
+            self.assertEqual(task['source'], 'library')
+        queued = self.films(library_id=library['id'], status='scraping')
+        self.assertEqual(queued['total'], partial['total'])
+
+    def test_batch_scrape_can_include_complete_films(self):
+        """资料完整的影片也能批量入队，用于补齐 NFO 里缺的字段。"""
+        library = self.create_library()
+        response = self.client.post('/api/library/films/scrape', json={'library_id': library['id']})
+        self.assertEqual(response.status_code, 202, response.text)
+        payload = response.json()
+        self.assertEqual(len(payload['accepted']), 3, '全部 3 部都应入队')
+        again = self.client.post('/api/library/films/scrape', json={'library_id': library['id']})
+        self.assertEqual(again.status_code, 202, again.text)
+        self.assertEqual(len(again.json()['accepted']), 0, '已在刮削中的影片不应重复入队')
+        self.assertEqual(len(again.json()['skipped']), 3)
+
+    def test_rescrape_keeps_fields_the_engine_did_not_write(self):
+        """引擎写 NFO 是整份重建：重新刮削后要把旧 NFO 里的女优、片商等补回去。"""
+        library = self.create_library()
+        film = self.film_by_dvdid('ABC-123')
+        nfo_path = Path(film['nfo_path'])
+        self.assertTrue(nfo_path.is_file())
+        before = nfo_path.read_text(encoding='utf-8')
+        self.assertIn('Actor A', before)
+        # 入队时会产生快照
+        response = self.client.post(f'/api/library/films/{film["id"]}/scrape', json={})
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertTrue((library_store.NFO_SNAPSHOT_DIR / f'{film["id"]}.nfo').is_file())
+        # 模拟引擎只写了标题和番号（没有演员、片商）
+        nfo_path.write_text(
+            '<?xml version="1.0"?><movie><title>新标题</title><uniqueid type="num">ABC-123</uniqueid></movie>',
+            encoding='utf-8')
+        library_store.refresh_film_after_task(film['id'], 'succeeded')
+        saved = nfo_path.read_text(encoding='utf-8')
+        self.assertIn('新标题', saved)
+        self.assertIn('Actor A', saved, '旧 NFO 里的演员应被补回')
+        self.assertIn('Studio X', saved, '旧 NFO 里的片商应被补回')
+        refreshed = library_store.get_film(film['id'], reconcile=False)
+        self.assertEqual(refreshed['actress'], ['Actor A'])
+        self.assertFalse((library_store.NFO_SNAPSHOT_DIR / f'{film["id"]}.nfo').exists(), '合并后清理快照')
+
+    def test_in_place_organize_keeps_each_film_separate(self):
+        """原地整理（save_dir 就是源目录）时，不能把同目录其它影片当成本片的分片。"""
+        library = self.create_library()
+        film = self.film_by_dvdid('ABC-123')
+        task = {
+            'status': 'succeeded',
+            'file_organizer': {'organized_files': [film['video_path']]},
+            'progress': {'output': {'save_dir': str(self.media)}},
+        }
+        library_store.refresh_film_after_task(film['id'], 'succeeded', '', task)
+        after = library_store.get_film(film['id'], reconcile=False)
+        self.assertEqual(len(after['files']), 1, '只能包含本片自己的文件')
+        self.assertEqual(after['video_path'], film['video_path'])
+        self.assertEqual(after['detached'], 0, '文件没搬家就不该标记已整理')
+        # 没有 organized_files 时同样不能乱认文件
+        library_store.refresh_film_after_task(film['id'], 'succeeded', '',
+                                              {'status': 'succeeded', 'progress': {'output': {'save_dir': str(self.media)}}})
+        after = library_store.get_film(film['id'], reconcile=False)
+        self.assertEqual(len(after['files']), 1)
+        self.assertEqual(after['detached'], 0)
+        # 其它影片不受影响
+        for dvdid in ('DEF-456', 'GHI-789'):
+            other = self.film_by_dvdid(dvdid)
+            self.assertEqual(other['detached'], 0)
+            self.assertNotEqual(other['video_path'], after['video_path'])
+
+    def test_real_move_is_still_followed(self):
+        library = self.create_library()
+        film = self.film_by_dvdid('ABC-123')
+        outside = Path(self.temp.name) / '#整理完成' / 'ABC-123'
+        outside.mkdir(parents=True)
+        target = outside / 'ABC-123.mp4'
+        Path(film['video_path']).rename(target)
+        task = {'status': 'succeeded', 'file_organizer': {'organized_files': [str(target)]},
+                'progress': {'output': {'save_dir': str(outside)}}}
+        library_store.refresh_film_after_task(film['id'], 'succeeded', '', task)
+        after = library_store.get_film(film['id'], reconcile=False)
+        self.assertEqual(Path(after['video_path']), target)
+        self.assertEqual(after['detached'], 1)
+
+    def fail_task(self, task_id: str) -> None:
+        """把一个任务标记为失败（模拟刮削失败后的记录与影片状态）。"""
+        from javsp_web import library_store, task_store
+
+        record = task_store.record(task_id, logs=False)
+        film_id = str(record.get('library_film_id') or '')
+        record['status'] = 'failed'
+        record['error'] = '抓取失败'
+        task_store.upsert(record)
+        if film_id:
+            library_store.refresh_film_after_task(film_id, 'failed', '抓取失败')
+
+    def test_retry_failed_task_uses_the_current_dvdid(self):
+        """重新刮削失败任务时会用影片当前番号（编辑资料后就是新番号）。"""
+        library = self.create_library()
+        film = self.film_by_dvdid('ABC-123')
+        first = self.client.post(f'/api/library/films/{film["id"]}/scrape', json={}).json()['task_id']
+        self.fail_task(first)
+        self.client.patch(f'/api/library/films/{film["id"]}',
+                          json={'dvdid': 'ZZZ-999', 'title': '新标题', 'actress': ['Actor A']})
+        response = self.client.post(f'/api/tasks/{first}/retry')
+        self.assertEqual(response.status_code, 202, response.text)
+        new_id = response.json()['task_id']
+        self.assertNotEqual(new_id, first)
+        job = tasks.get_task(new_id)
+        self.assertEqual(job['forced_avid'], 'ZZZ-999', '应使用编辑后的番号')
+        self.assertEqual(job['library_film_id'], film['id'])
+        # 列表接口也要带上关联影片，前端才能显示“资料”按钮
+        listing = self.client.get('/api/tasks', params={'view': 'all', 'status': 'failed'}).json()
+        self.assertTrue(listing, '应能查到失败任务')
+        self.assertEqual(listing[0]['library_film_id'], film['id'])
+        refreshed = library_store.get_film(film['id'], reconcile=False)
+        self.assertEqual(refreshed['scrape_state'], 'queued')
+
+    def test_retry_failed_tasks_batch(self):
+        library = self.create_library()
+        first = self.client.post('/api/library/films/scrape', json={'library_id': library['id']}).json()
+        for task_id in first['accepted'][:2]:
+            self.fail_task(task_id)
+        response = self.client.post('/api/tasks/retry-failed', json={})
+        self.assertEqual(response.status_code, 202, response.text)
+        payload = response.json()
+        self.assertEqual(len(payload['accepted']), 2)
+        self.assertEqual(payload['total'], 2)
+        self.assertTrue(all(isinstance(item, str) for item in payload['accepted']))
+        again = self.client.post('/api/tasks/retry-failed', json={})
+        self.assertEqual(again.status_code, 202)
+        self.assertEqual(len(again.json()['accepted']), 0, '已在队列中的不再重复入队')
+        self.assertEqual(len(again.json()['skipped']), 2)
+
+    def test_per_file_nfo_wins_over_a_stub_movie_nfo(self):
+        """目录里同时有同名 NFO 和只写了番号的 movie.nfo 时，要用资料更全的那个。"""
+        folder = self.media / 'STUB-001'
+        folder.mkdir()
+        (folder / 'STUB-001.mp4').write_bytes(VIDEO_BYTES)
+        (folder / 'movie.nfo').write_text(
+            '<?xml version="1.0" encoding="utf-8"?><movie><uniqueid type="num" default="true">STUB-001</uniqueid></movie>',
+            encoding='utf-8')
+        (folder / 'STUB-001.nfo').write_text(
+            '<?xml version="1.0" encoding="utf-8"?><movie><title>STUB-001 完整标题</title>'
+            '<uniqueid type="num" default="true">STUB-001</uniqueid><studio>Studio S</studio>'
+            '<premiered>2024-05-01</premiered><actor><name>Actor S</name></actor></movie>',
+            encoding='utf-8')
+        Image.new('RGB', (24, 36), 'red').save(folder / 'STUB-001.jpg')
+        library = self.create_library()
+        film = next(item for item in self.films(library_id=library['id'])['items'] if item['dvdid'] == 'STUB-001')
+        self.assertTrue(film['nfo_path'].endswith('STUB-001.nfo'), '应指向同名 NFO')
+        self.assertEqual(film['title'], 'STUB-001 完整标题')
+        self.assertEqual(film['studio'], 'Studio S')
+        self.assertEqual(film['release_date'], '2024-05-01')
+        self.assertEqual(film['actress'], ['Actor S'])
+        self.assertEqual(film['status'], 'complete', film['missing_fields'])
+
+    def test_stats_follow_the_selected_group(self):
+        """统计要跟着分类走：选中某个女优后只统计她的影片。"""
+        extra = self.media / 'JKL-012'
+        extra.mkdir()
+        (extra / 'JKL-012.mp4').write_bytes(VIDEO_BYTES)
+        write_nfo(extra / 'JKL-012.nfo', 'JKL-012', 'Second Title')
+        Image.new('RGB', (24, 36), 'green').save(extra / 'JKL-012.jpg')
+        library = self.create_library()
+        whole = self.films(library_id=library['id'])
+        self.assertEqual(whole['stats']['total'], 4)
+        groups = self.client.get('/api/library/groups',
+                                 params={'by': 'actress', 'library_id': library['id']}).json()
+        actress = groups['groups'][0]
+        page = self.films(library_id=library['id'], group_by='actress', group=actress['key'])
+        self.assertEqual(page['total'], actress['count'])
+        self.assertEqual(page['stats']['total'], actress['count'], '总数应等于该分类的影片数')
+        self.assertEqual(page['stats']['complete'], page['total'], '都应有完整资料')
+        # 搜索也影响统计
+        searched = self.films(library_id=library['id'], query='JKL-012')
+        self.assertEqual(searched['stats']['total'], 1)
+
+    def test_groups_load_without_per_group_queries(self):
+        """分组封面必须一次查完：以前每个女优查一次，637 个女优要 3 秒多。"""
+        from contextlib import contextmanager
+
+        library = self.create_library()
+        statements: list[str] = []
+        original = library_store.connection
+
+        @contextmanager
+        def traced():
+            with original() as db:
+                db.set_trace_callback(statements.append)
+                yield db
+
+        with patch.object(library_store, 'connection', traced):
+            payload = library_store.groups('actress', library['id'])
+        selects = [item for item in statements if item.strip().upper().startswith('SELECT')]
+        self.assertLess(len(selects), 12, f'分组查询次数过多（{len(selects)} 次）：{selects[:5]}')
+        self.assertTrue(payload['groups'])
+        for group in payload['groups']:
+            self.assertLessEqual(len(group['covers']), 9)
+
+    def test_task_metadata_fills_fields_lost_from_nfo(self):
+        """NFO 被第三方改写成只有标题时，用任务里抓到的资料补全并写回 NFO。"""
+        library = self.create_library()
+        film = self.film_by_dvdid('ABC-123')
+        nfo_path = Path(film['nfo_path'])
+        # 模拟 Jellyfin/Emby 覆盖：只剩 sorttitle，没有 title/actor/studio/premiered
+        nfo_path.write_text(
+            '<?xml version="1.0" encoding="utf-8"?><movie><sorttitle>ABC-123</sorttitle>'
+            '<lockdata>false</lockdata><runtime>115</runtime></movie>', encoding='utf-8')
+        library_store.refresh_film_after_task(film['id'], 'succeeded', '')
+        self.assertEqual(library_store.get_film(film['id'], reconcile=False)['title'], 'Demo Title',
+                         'stub NFO 不应把已有标题冲掉')
+        task = {'status': 'succeeded', 'progress': {'metadata': {
+            'dvdid': 'ABC-123', 'title': '被抓到的标题', 'actress': ['Actor A'],
+            'director': 'Director D', 'producer': 'Studio X', 'publisher': 'Publisher P',
+            'publish_date': '2020-09-21'}}}
+        library_store.refresh_film_after_task(film['id'], 'succeeded', '', task)
+        refreshed = library_store.get_film(film['id'], reconcile=False)
+        self.assertEqual(refreshed['title'], '被抓到的标题')
+        self.assertEqual(refreshed['actress'], ['Actor A'])
+        self.assertEqual(refreshed['studio'], 'Studio X')
+        self.assertEqual(refreshed['release_date'], '2020-09-21')
+        self.assertEqual(refreshed['status'], 'complete')
+        saved = nfo_path.read_text(encoding='utf-8')
+        self.assertIn('被抓到的标题', saved)
+        self.assertIn('Actor A', saved)
+
+    def test_rescan_keeps_metadata_when_nfo_is_a_stub(self):
+        """NFO 被媒体服务器改写成 stub 后，重新扫描不能把已刮好的资料冲掉。"""
+        library = self.create_library()
+        film = self.film_by_dvdid('ABC-123')
+        nfo_path = Path(film['nfo_path'])
+        nfo_path.write_text(
+            '<?xml version="1.0" encoding="utf-8"?><movie><sorttitle>ABC-123</sorttitle></movie>',
+            encoding='utf-8')
+        job = self.client.post(f'/api/library/libraries/{library["id"]}/scan').json()['scan']
+        for _ in range(200):
+            scan = self.client.get(f'/api/library/scans/{job["id"]}').json()['scan']
+            if scan['status'] in ('succeeded', 'failed'):
+                break
+            time.sleep(0.05)
+        refreshed = library_store.get_film(film['id'], reconcile=False)
+        self.assertEqual(refreshed['title'], 'Demo Title', '重扫不应把标题清空')
+        self.assertEqual(refreshed['actress'], ['Actor A'])
+        self.assertEqual(refreshed['status'], 'complete')
+
+    def test_nfo_path_is_unique_per_film(self):
+        """多视频目录必须用 <视频文件名>.nfo；单视频目录用 movie.nfo —— 每部影片只有一个 NFO。"""
+        multi = self.media / 'MULTI-001'
+        multi.mkdir()
+        for suffix in ('A', 'B'):
+            (multi / f'MULTI-001-{suffix}.mp4').write_bytes(VIDEO_BYTES)
+        (multi / 'movie.nfo').write_text(
+            '<?xml version="1.0"?><movie><title>共享 NFO</title></movie>', encoding='utf-8')
+        single = self.media / 'SINGLE-002'
+        single.mkdir()
+        (single / 'SINGLE-002.mp4').write_bytes(VIDEO_BYTES)
+        library = self.create_library()
+        films = self.films(library_id=library['id'])
+        multi_films = [item for item in films['items'] if item['dvdid'].startswith('MULTI-001')]
+        self.assertTrue(multi_films)
+        for item in multi_films:
+            self.assertFalse(item['nfo_path'].endswith('movie.nfo'),
+                             f'多视频目录不能共用 movie.nfo：{item["nfo_path"]}')
+            self.assertEqual(library_store._nfo_target(item).name,
+                             f'{Path(item["video_path"]).stem}.nfo')
+        single_film = next(item for item in films['items'] if item['dvdid'] == 'SINGLE-002')
+        self.assertEqual(single_film['nfo_path'], '', '还没有 NFO 时不应凭空指向 movie.nfo')
+        # 写入目标是单视频目录的 movie.nfo（与引擎默认一致）
+        target = library_store._nfo_target(single_film)
+        self.assertEqual(target.name, 'movie.nfo')
+        multi_target = library_store._nfo_target(multi_films[0])
+        self.assertEqual(multi_target.name, f'{Path(multi_films[0]["video_path"]).stem}.nfo')
+
+    def test_task_config_uses_the_library_nfo_name(self):
+        """媒体库任务生成的任务配置要把引擎的 NFO 命名改成媒体库用的那个文件。"""
+        multi = self.media / 'CONF-003'
+        multi.mkdir()
+        (multi / 'CONF-003.mp4').write_bytes(VIDEO_BYTES)
+        (multi / 'CONF-003-2.mp4').write_bytes(VIDEO_BYTES)
+        library = self.create_library()
+        film = next(item for item in self.films(library_id=library['id'])['items']
+                    if item['dvdid'] == 'CONF-003' and item['video_path'].endswith('CONF-003.mp4'))
+        response = self.client.post(f'/api/library/films/{film["id"]}/scrape', json={})
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()['task_id']
+        config = yaml.safe_load((self.root / 'state' / 'task-config' / f'{task_id}.yml').read_text(encoding='utf-8'))
+        self.assertEqual(config['summarizer']['nfo']['basename_pattern'], 'CONF-003')
+
     def test_search_is_case_insensitive(self):
         library = self.create_library()
         for needle in ('def-456', 'DEF-456', 'Def-456'):

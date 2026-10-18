@@ -1296,6 +1296,34 @@ def update_config(body: ConfigBody, _: dict = Depends(require_admin)) -> dict:
     return {"ok": True}
 
 
+class RetryFailedBody(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=2000)
+
+
+@app.post("/api/tasks/retry-failed", status_code=202)
+def retry_failed_tasks_route(body: RetryFailedBody | None = None,
+                             _: dict = Depends(current_user)) -> dict:
+    """把失败的任务批量重新派到队列（可选只重试指定 id）。"""
+    from . import tasks as task_runner
+
+    ids = list(body.ids) if body else []
+    return task_runner.retry_failed_tasks(ids or None)
+
+
+@app.post("/api/tasks/{task_id}/retry", status_code=202)
+def retry_task_route(task_id: str, _: dict = Depends(current_user)) -> dict:
+    """重新刮削单个失败/已取消的任务。"""
+    from . import tasks as task_runner
+
+    try:
+        new_id = task_runner.retry_task(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"task_id": new_id, "task": get_task(new_id)}
+
+
 @app.get("/api/tasks")
 def tasks(request: Request, limit: int | None = Query(default=None, ge=1, le=500), offset: int = Query(default=0, ge=0),
           view: Literal['all', 'manual', 'overview'] = 'all', query: str = '',
@@ -2483,8 +2511,15 @@ class LibraryScrapeBody(BaseModel):
 
 
 class LibraryBatchScrapeBody(BaseModel):
-    ids: list[str] = Field(default_factory=list, max_length=500)
+    ids: list[str] = Field(default_factory=list, max_length=2000)
+    library_id: str = ""
+    folder_id: str = ""
+    status: str = ""
+    query: str = Field(default="", max_length=200)
+    group_by: str = ""
+    group: str = Field(default="", max_length=200)
     preset_id: str | None = None
+    limit: int = Field(default=2000, ge=1, le=5000)
 
 
 def _library_film_or_404(film_id: str, reconcile: bool = True) -> dict:
@@ -2647,14 +2682,22 @@ def scrape_library_film(film_id: str, body: LibraryScrapeBody, _: dict = Depends
 
 @app.post("/api/library/films/scrape", status_code=202)
 def scrape_library_films(body: LibraryBatchScrapeBody, _: dict = Depends(current_user)) -> dict:
+    """批量刮削：按当前筛选范围（库/文件夹/状态/搜索/分组）或显式 ids 入队。
+
+    已完整的影片同样可以入队，用于补齐 NFO 里缺的字段；预设的必需字段仍然生效。
+    """
+    film_ids = list(dict.fromkeys(body.ids))
+    if not film_ids:
+        film_ids = library_store.film_ids(body.library_id, body.folder_id, body.status,
+                                          body.query.strip(), body.group_by, body.group, body.limit)
     accepted: list[str] = []
     skipped: list[dict] = []
-    for film_id in dict.fromkeys(body.ids):
+    for film_id in film_ids:
         try:
             accepted.append(library_store.start_scrape(film_id, None, body.preset_id)["task_id"])
         except ValueError as exc:
             skipped.append({"id": film_id, "reason": str(exc)})
-    return {"accepted": accepted, "skipped": skipped}
+    return {"accepted": accepted, "skipped": skipped, "total": len(film_ids)}
 
 
 @app.get("/api/library/groups")

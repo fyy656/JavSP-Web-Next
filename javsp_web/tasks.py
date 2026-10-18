@@ -907,7 +907,7 @@ def _task_list_summary(item: dict) -> dict:
             "return_code", "error", "batch_id", "task_concurrency", "source", "schedule_id",
             "preset_id", "preset_name", "file_name", "size_bytes", "title", "cover_count",
             "fanart_count", "image_retry_available", "image_retry_running", "restore_available", "image_retry_started_at", "updated_at",
-            "task_type", "scan",
+            "task_type", "scan", "library_film_id",
         )
     } | {
         "has_artwork_sources": bool(image_sources.get("cover_urls") or image_sources.get("preview_pics") or item.get('artwork_override')),
@@ -1274,6 +1274,35 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def _canonical_nfo_basename(input_directory: str) -> str:
+    """让引擎把 NFO 写到媒体库使用的那一个文件上（每部影片只有一个 NFO）。"""
+    from . import library_store
+
+    path = Path(input_directory)
+    if not path.is_file():
+        return ""
+    folder = path.parent
+    if not folder.is_dir():
+        return ""
+    try:
+        return library_store.canonical_nfo_basename(folder, path)
+    except OSError:
+        return ""
+
+
+def override_nfo_basename(config_path: Path, basename: str) -> None:
+    """把任务配置里的 NFO 文件名改成媒体库使用的那个（literal，转义大括号）。"""
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    summarizer = data.get("summarizer")
+    if not isinstance(summarizer, dict):
+        summarizer = data["summarizer"] = {}
+    nfo = summarizer.get("nfo")
+    if not isinstance(nfo, dict):
+        nfo = summarizer["nfo"] = {}
+    nfo["basename_pattern"] = str(basename).replace("{", "{{").replace("}", "}}")
+    config_path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
 def _build_task_config(task_id: str, input_directory: str, preset_id: str, input_files: list[str] | None = None, snapshot: tuple[dict, dict] | None = None) -> tuple[Path, str]:
     data, preset = copy.deepcopy(snapshot or _preset_config_data(preset_id))
     scanner = data.setdefault("scanner", {})
@@ -1337,6 +1366,11 @@ def create_task(
     if library_film_id:
         task["library_film_id"] = str(library_film_id)
     config_path, preset_name = _build_task_config(task_id, input_directory, preset_id, selected, snapshot)
+    if library_film_id:
+        # 媒体库任务：让引擎的 NFO 与媒体库读到的是同一个文件
+        basename = _canonical_nfo_basename(input_directory)
+        if basename:
+            override_nfo_basename(config_path, basename)
     task["config_path"] = str(config_path)
     task["preset_id"] = preset_id
     task["preset_name"] = preset_name
@@ -1346,6 +1380,51 @@ def create_task(
         _persist(task)
         _enqueue_task(task)
     return task
+
+
+def retry_task(task_id: str) -> str:
+    """把失败/已取消的任务重新派到队列，返回新任务 id。
+
+    关联了媒体库影片的任务走 `library_store.start_scrape`，这样会用影片**当前**的番号
+    （编辑资料后就是新番号）并重建 NFO 快照，和媒体库里的“刮削”行为一致。
+    """
+    from . import library_store, task_store
+
+    task = task_store.record(task_id, logs=False)
+    if not task:
+        raise KeyError(task_id)
+    if task.get('status') not in ('failed', 'cancelled'):
+        raise ValueError('只有失败或已取消的任务可以重新刮削')
+    film_id = str(task.get('library_film_id') or '')
+    if film_id:
+        film = library_store.get_film(film_id, reconcile=False)
+        if film:
+            if film.get('scrape_state') in ('queued', 'running'):
+                raise ValueError('该影片已经在刮削队列中')
+            return library_store.start_scrape(film_id)['task_id']
+    input_directory = str(task.get('input_directory') or '')
+    if not input_directory or not os.path.exists(input_directory):
+        raise ValueError('原始路径已不存在')
+    created = create_task(input_directory, task.get('preset_id') or 'default',
+                          source=task.get('source') or 'manual',
+                          input_files=task.get('input_files') or None,
+                          forced_avid=task.get('forced_avid') or None)
+    return created['id']
+
+
+def retry_failed_tasks(task_ids: list[str] | None = None, limit: int = 200) -> dict:
+    """批量重新派发失败的任务；返回新任务 id 与跳过原因。"""
+    from . import task_store
+
+    candidates = task_ids if task_ids else task_store.ids(view='all', status='failed')
+    accepted: list[str] = []
+    skipped: list[dict] = []
+    for task_id in list(dict.fromkeys(candidates))[:limit]:
+        try:
+            accepted.append(retry_task(task_id))
+        except (KeyError, ValueError) as exc:
+            skipped.append({'id': task_id, 'reason': str(exc)})
+    return {'accepted': accepted, 'skipped': skipped, 'total': len(candidates)}
 
 
 def create_tasks(

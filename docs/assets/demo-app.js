@@ -1300,6 +1300,36 @@ function stopAllTasks() {
   stopTasks([], '所有排队中与运行中的任务');
 }
 
+async function retryTask(taskId) {
+  try {
+    await api(`/api/tasks/${encodeURIComponent(taskId)}/retry`, { method: 'POST' });
+    showToast('已重新加入刮削队列');
+    if (state.activeTaskDetail === taskId) $('#task-detail-dialog')?.close();
+    await loadTasks();
+  } catch (error) {
+    showToast(error.message || '重新刮削失败', 'danger');
+  }
+}
+
+function retryFailedTasks() {
+  confirmAction({
+    title: '重试失败任务',
+    text: '把所有状态为“失败”的任务重新加入刮削队列。已经在队列里的影片会跳过。',
+    confirmLabel: '重新刮削',
+    run: async () => {
+      try {
+        const result = await api('/api/tasks/retry-failed', { method: 'POST', body: JSON.stringify({}) });
+        const accepted = (result.accepted || []).length;
+        const skipped = (result.skipped || []).length;
+        showToast(skipped ? `已重新加入 ${accepted} 个任务，跳过 ${skipped} 个` : `已重新加入 ${accepted} 个任务`);
+        await loadTasks();
+      } catch (error) {
+        showToast(error.message || '批量重试失败', 'danger');
+      }
+    },
+  });
+}
+
 async function deleteTaskInDialog(id) {
   const task = state.tasks.find((item) => item.id === id);
   state.pendingDeleteTask = id;
@@ -1715,6 +1745,31 @@ document.addEventListener('contextmenu', (event) => {
   menu.hidden = false;
 });
 document.addEventListener('click', (event) => {
+  const metadataJump = event.target.closest('[data-task-metadata]');
+  if (metadataJump) {
+    event.preventDefault();
+    const filmId = metadataJump.dataset.filmId;
+    if (filmId && window.JavspLibrary?.open) {
+      // 关联媒体库的任务统一到媒体库详情里改，改完整批刮削
+      window.JavspLibrary.open(filmId);
+      return;
+    }
+    // 没有关联影片（例如手动扫描任务）就地打开编辑
+    state.taskMetadataEditing = true;
+    openTaskDetail(metadataJump.dataset.taskMetadata);
+    return;
+  }
+  const retryButton = event.target.closest('[data-retry-task]');
+  if (retryButton) {
+    event.preventDefault();
+    retryTask(retryButton.dataset.retryTask);
+    return;
+  }
+  if (event.target.closest('#task-retry-failed')) {
+    event.preventDefault();
+    retryFailedTasks();
+    return;
+  }
   if (event.target.closest('#overview-records-refresh')) {
     event.preventDefault();
     loadTasks();
@@ -1759,6 +1814,13 @@ document.addEventListener('click', (event) => {
 });
 document.addEventListener('click', (event) => {
   if (event.target.closest('[data-edit-task-metadata]')) {
+    const current = state.tasks.find((item) => item.id === state.activeTaskDetail);
+    if (current?.library_film_id && window.JavspLibrary?.open) {
+      // 关联媒体库的任务统一到媒体库详情里改，改完可以“保存”再批量刮削
+      $('#task-detail-dialog')?.close();
+      window.JavspLibrary.open(current.library_film_id);
+      return;
+    }
     state.taskMetadataEditing = true;
     if (state.activeTaskDetail) openTaskDetail(state.activeTaskDetail);
     return;
@@ -2089,10 +2151,14 @@ function taskCard(task) {
   const titleMeta = task.title ? `<span>文件：${escapeHtml(fileName)}</span>` : '';
   const actions = '';
   const detailButton = `<button class="icon-button" type="button" data-task-detail="${escapeHtml(task.id)}" title="查看任务详情">详情</button>`;
+  const metadataButton = `<button class="icon-button" type="button" data-task-metadata="${escapeHtml(task.id)}"${task.library_film_id ? ` data-film-id="${escapeHtml(task.library_film_id)}"` : ''} title="编辑番号等资料">资料</button>`;
+  const retryButton = ['failed', 'cancelled'].includes(task.status)
+    ? `<button class="button secondary small" type="button" data-retry-task="${escapeHtml(task.id)}" title="用当前资料重新刮削">重新刮削</button>`
+    : '';
   const stopButton = taskStopButton(task);
   const deleteButton = `<button class="task-delete" type="button" data-delete-task="${escapeHtml(task.id)}"${active ? ' disabled title="请先停止任务"' : ' title="删除任务"'}>删除</button>`;
   const select = `<input type="checkbox" class="task-select" data-task-select="${escapeHtml(task.id)}" aria-label="选择任务"${state.selectedTaskIds?.has(task.id) ? ' checked' : ''}>`;
-  return `<article class="task-card task-card-collapsible" data-task-card="${escapeHtml(task.id)}"><div class="task-card-head"><div class="task-card-title"><strong>${escapeHtml(taskDisplayName(task))}</strong><div class="task-meta">${titleMeta}<span>预设：${escapeHtml(task.preset_name || task.preset_id || '默认配置')}</span><span>时间：${new Date(task.created_at).toLocaleString()}</span></div><div class="task-path">路径：${escapeHtml(task.input_directory)}</div><div class="task-image-summary">${escapeHtml(imageProgressSummary(task))}</div></div><div class="task-card-tools">${select}<span class="badge ${task.status}">${labels[task.status] || task.status}</span>${detailButton}${stopButton}${deleteButton}<button class="task-toggle" type="button" data-task-toggle="${escapeHtml(task.id)}" aria-expanded="${expanded}" title="${expanded ? '收起任务' : '展开任务'}">${expandControlIcon(expanded)}</button></div></div><div class="task-card-body${expanded ? '' : ' hidden'}" data-task-body="${escapeHtml(task.id)}">${progressMarkup(task)}${task.error ? `<div class="form-error">${escapeHtml(task.error)}</div>` : ''}${actions}</div></article>`;
+  return `<article class="task-card task-card-collapsible" data-task-card="${escapeHtml(task.id)}"><div class="task-card-head"><div class="task-card-title"><strong>${escapeHtml(taskDisplayName(task))}</strong><div class="task-meta">${titleMeta}<span>预设：${escapeHtml(task.preset_name || task.preset_id || '默认配置')}</span><span>时间：${new Date(task.created_at).toLocaleString()}</span></div><div class="task-path">路径：${escapeHtml(task.input_directory)}</div><div class="task-image-summary">${escapeHtml(imageProgressSummary(task))}</div></div><div class="task-card-tools">${select}<span class="badge ${task.status}">${labels[task.status] || task.status}</span>${metadataButton}${detailButton}${retryButton}${stopButton}${deleteButton}<button class="task-toggle" type="button" data-task-toggle="${escapeHtml(task.id)}" aria-expanded="${expanded}" title="${expanded ? '收起任务' : '展开任务'}">${expandControlIcon(expanded)}</button></div></div><div class="task-card-body${expanded ? '' : ' hidden'}" data-task-body="${escapeHtml(task.id)}">${progressMarkup(task)}${task.error ? `<div class="form-error">${escapeHtml(task.error)}</div>` : ''}${actions}</div></article>`;
 }
 
 function rememberTaskCards() {
@@ -2107,7 +2173,7 @@ function ensureTaskFilters() {
   if ($('#task-filter-bar')) return;
   const taskTable = $('#task-table');
   if (!taskTable) return;
-  taskTable.insertAdjacentHTML('beforebegin', `<div id="task-filter-bar" class="task-filter-bar" aria-label="任务筛选"><select id="task-filter-field"><option value="all">全部信息</option><option value="path">路径</option><option value="title">标题</option><option value="dvdid">番号</option><option value="actress">女优</option></select><input id="task-filter-query" type="search" placeholder="搜索路径、标题、番号或女优"><select id="task-filter-status"><option value="">全部状态</option><option value="queued">排队中</option><option value="running">运行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select><label>大小 MB<input id="task-filter-size-min" type="number" min="0" placeholder="最小"></label><span>至</span><label><input id="task-filter-size-max" type="number" min="0" placeholder="最大"></label><label>时间<input id="task-filter-date-from" type="date"></label><span>至</span><label><input id="task-filter-date-to" type="date"></label><button id="task-filter-reset" class="button secondary" type="button">重置</button><button id="task-select-mode" class="button secondary" type="button" aria-pressed="false">批量选择</button><button id="task-purge-open" class="button secondary" type="button">清理记录</button><button id="task-stop-all" class="button secondary" type="button" title="停止所有排队中与运行中的任务">停止全部任务</button></div><div id="task-selection-bar" class="task-selection-bar" hidden><span id="task-selection-count">已选 0 条</span><button id="task-select-page" class="button secondary" type="button">选择本页</button><button id="task-select-all" class="button secondary" type="button">选择全部</button><button id="task-selection-clear" class="button secondary" type="button">取消选择</button><button id="task-delete-selected" class="button danger" type="button" disabled>删除记录</button></div><p id="task-filter-summary" class="muted"></p><div id="task-pagination" class="overview-pagination"></div>`);
+  taskTable.insertAdjacentHTML('beforebegin', `<div id="task-filter-bar" class="task-filter-bar" aria-label="任务筛选"><select id="task-filter-field"><option value="all">全部信息</option><option value="path">路径</option><option value="title">标题</option><option value="dvdid">番号</option><option value="actress">女优</option></select><input id="task-filter-query" type="search" placeholder="搜索路径、标题、番号或女优"><select id="task-filter-status"><option value="">全部状态</option><option value="queued">排队中</option><option value="running">运行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select><label>大小 MB<input id="task-filter-size-min" type="number" min="0" placeholder="最小"></label><span>至</span><label><input id="task-filter-size-max" type="number" min="0" placeholder="最大"></label><label>时间<input id="task-filter-date-from" type="date"></label><span>至</span><label><input id="task-filter-date-to" type="date"></label><button id="task-filter-reset" class="button secondary" type="button">重置</button><button id="task-select-mode" class="button secondary" type="button" aria-pressed="false">批量选择</button><button id="task-purge-open" class="button secondary" type="button">清理记录</button><button id="task-retry-failed" class="button secondary" type="button" title="把所有失败的任务重新加入刮削队列">重试失败</button><button id="task-stop-all" class="button secondary" type="button" title="停止所有排队中与运行中的任务">停止全部任务</button></div><div id="task-selection-bar" class="task-selection-bar" hidden><span id="task-selection-count">已选 0 条</span><button id="task-select-page" class="button secondary" type="button">选择本页</button><button id="task-select-all" class="button secondary" type="button">选择全部</button><button id="task-selection-clear" class="button secondary" type="button">取消选择</button><button id="task-delete-selected" class="button danger" type="button" disabled>删除记录</button></div><p id="task-filter-summary" class="muted"></p><div id="task-pagination" class="overview-pagination"></div>`);
   $('#task-filter-field')?.remove();
   let filterTimer;
   document.querySelectorAll('#task-filter-bar input, #task-filter-bar select').forEach((control) => control.addEventListener('input', () => { clearTimeout(filterTimer); filterTimer = setTimeout(() => { state.taskPage = 0; state.selectedTaskIds.clear(); state.taskSelectAnchor = ''; loadTasks(); }, 200); }));

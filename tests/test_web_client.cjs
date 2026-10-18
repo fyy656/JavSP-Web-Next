@@ -162,6 +162,38 @@ async function verifyBatchTaskStop() {
   assert.ok(page.includes('id="overview-stop-all"'), 'missing stop control id="overview-stop-all"');
 }
 
+async function verifyRetryControls() {
+  const root = path.join(__dirname, '..');
+  const app = fs.readFileSync(path.join(root, 'javsp_web/web/assets/app.js'), 'utf8');
+  const library = fs.readFileSync(path.join(root, 'javsp_web/web/assets/library.js'), 'utf8');
+  assert.match(app, /data-retry-task=/, '失败任务卡片要有重新刮削按钮');
+  assert.match(app, /data-task-metadata=/, '任务卡片要有资料按钮');
+  assert.match(app, /id="task-retry-failed"/, '工具栏要有批量重试失败');
+  assert.match(app, /message: '重试失败任务'|title: '重试失败任务'/, '批量重试需要确认框');
+  assert.match(library, /编辑番号等资料">资料</, '媒体库的详情按钮改叫资料');
+
+  const calls = [];
+  const context = vm.createContext({
+    state: {},
+    $: () => ({ close() {} }),
+    api: async (url, options) => { calls.push({ url, method: options?.method }); return { task_id: 'new-1' }; },
+    showToast: (message) => calls.push({ toast: message }),
+    loadTasks: async () => { calls.push({ refreshed: true }); },
+    confirmAction: ({ run }) => run(),
+  });
+  const start = app.indexOf('async function retryTask(');
+  const end = app.indexOf('async function deleteTaskInDialog(');
+  vm.runInContext(app.slice(start, end), context);
+  await context.retryTask('task-1');
+  assert.deepEqual(calls[0], { url: '/api/tasks/task-1/retry', method: 'POST' });
+  assert.ok(calls.some((call) => call.refreshed), '重试后要刷新列表');
+  calls.length = 0;
+  await context.retryFailedTasks();
+  await new Promise((resolve) => setTimeout(resolve, 25));  // confirmAction 的回调是异步执行的
+  assert.ok(calls.some((call) => call.url === '/api/tasks/retry-failed' && call.method === 'POST'));
+  assert.ok(calls.some((call) => call.toast && /重新加入/.test(call.toast)));
+}
+
 async function main() {
   let count = 0;
   let release;
@@ -209,6 +241,7 @@ async function main() {
   await verifyReportedVersion();
   await verifyChannelSwitchSubmission();
   await verifyBatchTaskStop();
+  await verifyRetryControls();
   console.log('Web client regression checks passed: version normalization, shared GET, ETag, timeout/retry, update overlay, batch stop.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

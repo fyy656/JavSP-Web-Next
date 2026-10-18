@@ -412,8 +412,12 @@ async function main() {
     listeners.change({ target: { id: 'library-group', value: 'actress' } });
     await new Promise((resolve) => setTimeout(resolve, 25));
     assert.equal(element('library-groups').hidden, false);
-    assert.match(element('library-groups').innerHTML, /演员甲<span>2<\/span>/);
-    listeners.click({ target: { closest: (selector) => (selector === '[data-lib-group]' ? { dataset: { libGroup: '演员甲' } } : null) }, preventDefault() {} });
+    // 默认卡片视图：选分类后主内容是分类卡片，影片墙让位
+    assert.match(element('library-groups').innerHTML, /data-lib-group-card="演员甲"/);
+    assert.equal(element('library-grid').hidden, true, '分类视图不显示影片墙');
+    assert.equal(calls.filter((call) => call.url.startsWith('/api/library/films')).length, 1,
+      '分类视图不应再请求影片墙');
+    listeners.click({ target: { closest: (selector) => (selector === '[data-lib-group-card]' ? { dataset: { libGroupCard: '演员甲' } } : null) }, preventDefault() {} });
     await new Promise((resolve) => setTimeout(resolve, 25));
     const last = calls.filter((call) => call.url.startsWith('/api/library/films')).at(-1);
     assert.match(last.url, /group_by=actress/);
@@ -473,11 +477,17 @@ async function main() {
     state.group = null;
     await library.refresh();
 
-    // 标签模式：所有名字都渲染成小胶囊
-    assert.match(element('library-groups').innerHTML, /lib-group[^"]*"[^>]*data-lib-group="演员甲"/);
-    assert.doesNotMatch(element('library-groups').innerHTML, /lib-group-card/);
+    // 默认卡片模式：名字渲染成封面大卡
+    assert.equal(state.groupMode, 'cards');
+    assert.match(element('library-groups').innerHTML, /class="lc-library-card" data-lib-group-card="演员甲"/);
 
-    // 切到卡片模式
+    // 切到标签模式
+    listeners.click({ target: { closest: (selector) => (selector === '#library-group-mode' ? {} : null) }, preventDefault() {} });
+    assert.equal(state.groupMode, 'chips');
+    assert.match(element('library-groups').innerHTML, /lib-group[^"]*"[^>]*data-lib-group="演员甲"/);
+    assert.doesNotMatch(element('library-groups').innerHTML, /lc-library-card/);
+
+    // 再切回卡片模式
     listeners.click({ target: { closest: (selector) => (selector === '#library-group-mode' ? {} : null) }, preventDefault() {} });
     assert.equal(state.groupMode, 'cards');
     const cards = element('library-groups').innerHTML;
@@ -586,6 +596,52 @@ async function main() {
     const backCall = calls.filter((call) => call.url.startsWith('/api/library/films')).at(-1);
     assert.match(backCall.url, /library_id=lib-b/);
     assert.equal(element('library-add-folder').hidden, false);
+  }
+
+  // 20) 批量刮削：按当前筛选提交，并提示预设必需字段
+  {
+    const { library, element, calls, listeners } = boot({
+      routes: {
+        '/api/library/libraries': { libraries: [libraryEntry('lib-a', '骑兵', [folder('r-1', 'A', { film_count: 3 })])] },
+        '/api/library/films': filmPage([film()], { total: 3, partial: 3 }),
+        '/api/presets': [{ id: 'default', name: '默认配置', form: { crawler: { required_keys: ['dvdid', 'cover', 'title'] } } }],
+        '/api/library/films/scrape': { accepted: ['t1', 't2'], skipped: [], total: 2 },
+      },
+    });
+    await library.load();
+    const state = library.internals.state;
+    state.status = 'partial';
+    state.query = 'ABC';
+    await library.refresh();
+    state.status = 'partial';
+    state.query = 'ABC';
+    element('library-batch-scrape').disabled = false;
+    await library.batchScrape();
+    await new Promise((resolve) => setTimeout(resolve, 30));  // confirmAction 的回调是异步执行的
+    const call = calls.find((item) => item.url === '/api/library/films/scrape');
+    assert.ok(call, '应调用批量刮削接口');
+    assert.equal(call.method, 'POST');
+    assert.equal(call.body.library_id, 'lib-a');
+    assert.equal(call.body.status, 'partial');
+    assert.equal(call.body.query, 'ABC');
+    assert.equal(call.body.preset_id, 'default');
+    assert.ok(calls.some((item) => item.toast && /已加入 2 个/.test(item.toast)), '应提示已加入数量');
+    assert.equal(element('library-batch-scrape').disabled, false);
+  }
+
+  // 21) 没有影片时批量刮削直接提示，不发请求
+  {
+    const { library, calls } = boot({
+      routes: {
+        '/api/library/libraries': { libraries: [libraryEntry('lib-a', '骑兵', [folder('r-1', 'A')])] },
+        '/api/library/films': filmPage([], { total: 0 }),
+      },
+    });
+    await library.load();
+    await library.batchScrape();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(calls.filter((item) => item.url === '/api/library/films/scrape').length, 0);
+    assert.ok(calls.some((item) => item.toast && /没有可刮削/.test(item.toast)));
   }
 
   console.log('library client tests passed');

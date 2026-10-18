@@ -182,8 +182,24 @@ def repair_artwork_paths():
     return repaired
 
 
+def backfill_library_film_id() -> int:
+    """把 payload 里的 library_film_id 补进旧记录的 summary，供“资料”按钮使用。"""
+    with connection() as db:
+        cursor = db.execute(
+            """UPDATE tasks SET summary=json_set(summary,'$.library_film_id', json_extract(payload,'$.library_film_id'))
+               WHERE json_extract(payload,'$.library_film_id') IS NOT NULL
+                 AND json_extract(summary,'$.library_film_id') IS NULL""")
+        return cursor.rowcount or 0
+
+
 def start_artwork_path_repair():
     def run():
+        try:
+            backfilled = backfill_library_film_id()
+            if backfilled:
+                logging.info('已补全 %s 条任务记录的媒体库影片关联', backfilled)
+        except Exception:
+            logging.exception('补全任务与影片关联失败，将在下次启动重试')
         try:
             repaired = repair_artwork_paths()
             if repaired:

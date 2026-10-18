@@ -7,6 +7,7 @@ never remove a film from the library.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import copy
 import hashlib
 import json
 import os
@@ -24,6 +25,8 @@ from .storage import DATA_DIR, VENDOR_DIR, read_config
 from .timeutils import now_iso
 
 LIBRARY_DB_FILE = DATA_DIR / "library.db"
+# 重新刮削前的 NFO 快照：引擎写 NFO 是整份重建，用它把旧资料补回去
+NFO_SNAPSHOT_DIR = DATA_DIR / "library-nfo-snapshots"
 
 VIDEO_EXTENSIONS = {'.3gp', '.avi', '.f4v', '.flv', '.iso', '.m2ts', '.m4v', '.mkv', '.mov',
                     '.mp4', '.mpeg', '.mpg', '.rm', '.rmvb', '.ts', '.vob', '.webm', '.wmv', '.strm'}
@@ -456,14 +459,40 @@ def remove_folder(library_id: str, root_id: str) -> bool:
 # NFO / artwork discovery
 
 
-def _nfo_candidates(directory: Path, stem: str, single_group: bool) -> list[Path]:
-    names = ['movie.nfo', f'{stem}.nfo']
-    found = [directory / name for name in names if (directory / name).is_file()]
-    if not found and single_group:
-        others = [item for item in directory.iterdir() if item.is_file() and item.suffix.lower() == '.nfo'] if directory.is_dir() else []
-        if len(others) == 1:
-            found = others
-    return found
+def _folder_videos(directory: Path) -> list[Path]:
+    extensions = _video_extensions()
+    try:
+        return [item for item in directory.iterdir() if item.is_file() and item.suffix.lower() in extensions]
+    except OSError:
+        return []
+
+
+def canonical_nfo_path(directory: Path, video: Path) -> Path:
+    """每部影片唯一的 NFO 路径。
+
+    多视频目录用 `<视频文件名>.nfo`（Emby/Jellyfin 只认这个，movie.nfo 会互相打架）；
+    单视频目录用 movie.nfo（引擎默认命名，Emby 也认），但目录里已经有同名 NFO 时沿用。
+    """
+    named = directory / f'{video.stem}.nfo'
+    if len(_folder_videos(directory)) > 1:
+        return named
+    return named if named.is_file() else directory / 'movie.nfo'
+
+
+def canonical_nfo_basename(directory: Path, video: Path) -> str:
+    """同一规则的文件名（不含扩展名），用于让引擎写到同一个 NFO。"""
+    return canonical_nfo_path(directory, video).stem
+
+
+def _nfo_candidates(directory: Path, video: Path) -> list[Path]:
+    canonical = canonical_nfo_path(directory, video)
+    candidates = [canonical] if canonical.is_file() else []
+    # 多视频目录里的 movie.nfo 是多部影片共用的，必须忽略（Emby 也不会用它）
+    if len(_folder_videos(directory)) <= 1:
+        other = directory / ('movie.nfo' if canonical.name != 'movie.nfo' else f'{video.stem}.nfo')
+        if other.is_file() and other != canonical:
+            candidates.append(other)
+    return candidates
 
 
 def _parse_nfo(path: Path) -> dict:
@@ -576,15 +605,19 @@ def _record_for_files(root: dict, directory: Path, files: list[Path], single_gro
     nfo_path = ''
     nfo_error = ''
     metadata = {}
-    for candidate in _nfo_candidates(directory, video.stem, single_group):
+    best_score = -1
+    for candidate in _nfo_candidates(directory, video):
         try:
-            metadata = _parse_nfo(candidate)
-            nfo_path = str(candidate)
-            break
+            parsed = _parse_nfo(candidate)
         except (OSError, ET.ParseError, ValueError) as exc:
             nfo_error = f'NFO 解析失败：{exc}'
             nfo_path = str(candidate)
             break
+        # 多个 NFO 都在时挑资料最全的那个，避免被只写了番号的 stub 抢走
+        score = sum(1 for key in ('title', 'dvdid', 'studio', 'release_date', 'runtime')
+                    if parsed.get(key)) + (1 if parsed.get('actress') else 0)
+        if score > best_score:
+            best_score, metadata, nfo_path = score, parsed, str(candidate)
     cover = _find_cover(directory, video.stem)
     _, fanart_count = _find_fanart(directory, video.stem)
     dvdid = str(metadata.get('dvdid') or '')
@@ -633,6 +666,24 @@ def _write_film(db, record: dict, existing: sqlite3.Row | None, preserve_manual:
             else:
                 record['dvdid'] = existing['dvdid']
                 record['dvdid_source'] = 'manual'
+        # NFO 被 Emby/Jellyfin 改写成只剩标题的 stub 时，别让一次重扫把已经刮好的资料冲掉
+        if not record.get('title') and existing['title']:
+            record['title'] = existing['title']
+            for field in ('original_title', 'plot', 'release_date', 'studio', 'publisher', 'director'):
+                if not record.get(field):
+                    record[field] = existing[field]
+            if not record.get('runtime'):
+                record['runtime'] = existing['runtime']
+            if not record.get('actress'):
+                kept = [item['name'] for item in db.execute(
+                    'SELECT name FROM film_actress WHERE film_id=? ORDER BY rowid', (record['id'],)).fetchall()]
+                if kept:
+                    record['actress'] = kept
+                    record['actress_text'] = '、'.join(kept)
+            record['status'], record['missing_fields'] = _status_for(
+                record.get('dvdid') or '', record.get('title') or '', record.get('cover_path') or '',
+                bool(record.get('nfo_path')), '', record.get('actress') or [],
+                str(record.get('studio') or ''), str(record.get('release_date') or ''))
         record['scrape_state'] = existing['scrape_state'] if existing['scrape_state'] in ('queued', 'running') else (
             'failed' if existing['scrape_state'] == 'failed' and record['status'] != 'complete' else 'idle')
         record['last_task_id'] = existing['last_task_id']
@@ -881,7 +932,8 @@ def list_films(library_id: str = '', folder_id: str = '', status: str = '', quer
         rows = db.execute(f'SELECT f.* FROM films f{where} ORDER BY {order},f.id LIMIT ? OFFSET ?',
                           [*params, limit, offset]).fetchall()
         items = [_film_from_row(db, row) for row in rows]
-        stats = _stats(db, library_id=library_id, folder_id=folder_id)
+        stats = _stats(db, library_id=library_id, folder_id=folder_id, query=query,
+                       group_by=group_by, group=group)
     return {'items': items, 'total': total, 'limit': limit, 'offset': offset, 'stats': stats}
 
 
@@ -893,11 +945,18 @@ def _film_scope(library_id: str = '', folder_id: str = '') -> tuple[str, list]:
     return '', []
 
 
-def _stats(db, library_id: str = '', folder_id: str = '') -> dict:
-    where, params = _film_scope(library_id, folder_id)
-    rows = dict(db.execute('SELECT status,count(*) FROM films' + where + ' GROUP BY status', params).fetchall())
-    scrape = dict(db.execute('SELECT scrape_state,count(*) FROM films' + where + ' GROUP BY scrape_state',
-                             params).fetchall())
+def _stats(db, library_id: str = '', folder_id: str = '', query: str = '',
+           group_by: str = '', group: str = '') -> dict:
+    """统计当前筛选范围（媒体库/文件夹/搜索/分类）的状态分布。
+
+    状态本身是统计维度，所以这里不按 status 过滤；分类和搜索会跟随。
+    """
+    conditions, params = _conditions(library_id, folder_id, '', query, group_by, group)
+    where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
+    rows = dict(db.execute('SELECT f.status,count(*) FROM films f' + where + ' GROUP BY f.status',
+                           params).fetchall())
+    scrape = dict(db.execute('SELECT f.scrape_state,count(*) FROM films f' + where +
+                             ' GROUP BY f.scrape_state', params).fetchall())
     return {
         'total': sum(rows.values()),
         'complete': rows.get('complete', 0),
@@ -964,36 +1023,106 @@ def _reconcile(film_id: str) -> None:
             db.execute("UPDATE films SET scrape_state='idle',updated_at=? WHERE id=?", (now_iso(), film_id))
 
 
-def _organized_videos(task: dict) -> list[Path]:
-    """任务整理后的视频文件（引擎会上报 organized_files，缺失时退回扫描 save_dir）"""
+def _organized_videos(task: dict, film: dict) -> list[Path]:
+    """任务整理后的视频文件。
+
+    只认引擎上报的 `organized_files`；退回扫描 save_dir 时必须文件名与本片一致，
+    否则会把同一目录下的其它影片当成这部影片的分片（原地整理时尤其危险）。
+    """
+    extensions = _video_extensions()
     organizer = task.get('file_organizer') or {}
     candidates = [Path(item) for item in (organizer.get('organized_files') or []) if str(item)]
-    extensions = _video_extensions()
     videos = [path for path in candidates if path.is_file() and path.suffix.lower() in extensions]
     if videos:
         return videos
     save_dir = str(((task.get('progress') or {}).get('output') or {}).get('save_dir') or '')
-    if save_dir and Path(save_dir).is_dir():
-        try:
-            return sorted(path for path in Path(save_dir).iterdir()
-                          if path.is_file() and path.suffix.lower() in extensions)
-        except OSError:
-            return []
-    return []
+    if not save_dir or not Path(save_dir).is_dir():
+        return []
+    stems = {Path(item).stem.casefold() for item in json.loads(film.get('files') or '[]')}
+    current_stem = Path(str(film.get('video_path') or '')).stem.casefold()
+    try:
+        return sorted(path for path in Path(save_dir).iterdir()
+                      if path.is_file() and path.suffix.lower() in extensions
+                      and (path.stem.casefold() in stems
+                           or (current_stem and path.stem.casefold() == current_stem)))
+    except OSError:
+        return []
 
 
 def _relocate_film(film_id: str, task: dict) -> bool:
     """整理会把文件移出媒体库目录；把索引搬到新位置，影片就不会变成“文件已丢失”。
 
-    预设开启“整理文件到整理目录”时这是常态：影片仍属于原媒体库，只是文件搬了家。
+    只有在原文件确实不在时才搬家：整理目录和源目录重合（原地整理）时，
+    绝不能把目录里的其它视频当成本片的文件。
     """
-    videos = _organized_videos(task)
+    film = get_film(film_id, reconcile=False)
+    if not film:
+        return False
+    current = Path(str(film.get('video_path') or ''))
+    if current.is_file():
+        if film.get('detached'):
+            with connection() as db:
+                db.execute('UPDATE films SET detached=0 WHERE id=?', (film_id,))
+        return False
+    videos = _organized_videos(task, film)
     if not videos:
         return False
     video = videos[0]
     with connection() as db:
         db.execute("UPDATE films SET dir_path=?,video_path=?,files=?,detached=1,updated_at=? WHERE id=?",
                    (str(video.parent), str(video), json.dumps([str(path) for path in videos]), now_iso(), film_id))
+    _refresh_film(film_id)
+    return True
+
+
+def _fill_from_task_metadata(film_id: str, task: dict) -> bool:
+    """用任务里抓到的资料补影片的空字段，并写回它自己的 NFO。
+
+    引擎抓到的资料可能被第三方（Jellyfin / Emby 打开“保存 NFO”时）用只含
+    <title> 的 stub 覆盖掉；媒体库这时会显示“缺资料”，但任务记录里其实有数据。
+    """
+    meta = ((task.get('progress') or {}).get('metadata') or {})
+    if not isinstance(meta, dict) or not meta:
+        return False
+    film = get_film(film_id, reconcile=False)
+    if not film:
+        return False
+
+    def pick(key: str, incoming) -> str:
+        # 任务刚抓到的资料优先（这才是刮削的结果）；抓取里没有的字段才沿用原值
+        value = str(incoming or '').strip()
+        return value or str(film.get(key) or '')
+
+    crawled_actress = [str(item).strip() for item in (meta.get('actress') or []) if str(item).strip()]
+    actress = crawled_actress or (film.get('actress') or [])
+    values = {
+        'dvdid': film.get('dvdid') or str(meta.get('dvdid') or ''),
+        'title': pick('title', meta.get('title')),
+        'original_title': film.get('original_title') or '',
+        'plot': film.get('plot') or '',
+        'release_date': pick('release_date', meta.get('publish_date')),
+        'studio': pick('studio', meta.get('producer')),
+        'publisher': pick('publisher', meta.get('publisher')),
+        'director': pick('director', meta.get('director')),
+        'runtime': film.get('runtime') or 0,
+        'actress': actress,
+    }
+    changed = (
+        values['title'] != (film.get('title') or '')
+        or values['release_date'] != (film.get('release_date') or '')
+        or values['studio'] != (film.get('studio') or '')
+        or values['publisher'] != (film.get('publisher') or '')
+        or values['director'] != (film.get('director') or '')
+        or values['actress'] != (film.get('actress') or [])
+    )
+    if not changed:
+        return False
+    target = _nfo_target(film)
+    expected = target.stat().st_mtime if target.is_file() else None
+    try:
+        _write_nfo(film, values, expected)
+    except OSError:
+        pass
     _refresh_film(film_id)
     return True
 
@@ -1009,16 +1138,34 @@ def refresh_film_after_task(film_id: str, status: str, error: str = '', task: di
     if status == 'succeeded':
         if not _relocate_film(film_id, task or {}):
             _refresh_film(film_id)
+        merged = _merge_nfo_snapshot(get_film(film_id, reconcile=False) or {'id': film_id})
+        if merged:
+            _refresh_film(film_id)
+        # NFO 被第三方改写时，用任务里的资料兜底，保证媒体库立刻显示最新结果
+        _fill_from_task_metadata(film_id, task or {})
         with connection() as db:
             db.execute("UPDATE films SET scrape_state='idle',last_error='',updated_at=? WHERE id=?",
                        (now_iso(), film_id))
     elif status in ('failed', 'cancelled'):
+        _drop_snapshot(film_id)
         with connection() as db:
             db.execute("UPDATE films SET scrape_state=?,last_error=?,updated_at=? WHERE id=?",
                        ('failed', error or ('任务已取消' if status == 'cancelled' else '刮削失败'), now_iso(), film_id))
     else:
         with connection() as db:
             db.execute("UPDATE films SET scrape_state='idle',updated_at=? WHERE id=?", (now_iso(), film_id))
+
+
+def film_ids(library_id: str = '', folder_id: str = '', status: str = '', query: str = '',
+             group_by: str = '', group: str = '', limit: int = 2000) -> list[str]:
+    """按媒体库的筛选条件取影片 id，供批量刮削使用（与列表页同一套条件）。"""
+    conditions, params = _conditions(library_id, folder_id, status, query, group_by, group)
+    where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
+    with connection() as db:
+        rows = db.execute(
+            f'SELECT f.id FROM films f{where} ORDER BY f.updated_at DESC, f.id LIMIT ?',
+            [*params, max(1, int(limit))]).fetchall()
+    return [row['id'] for row in rows]
 
 
 def groups(by: str, library_id: str = '', query: str = '', folder_id: str = '') -> dict:
@@ -1048,18 +1195,33 @@ def groups(by: str, library_id: str = '', query: str = '', folder_id: str = '') 
             rows = db.execute(f"""SELECT substr(coalesce(f.release_date,''),1,4) AS key, count(*) AS count
                 FROM films f{films_where} GROUP BY key ORDER BY key DESC""", params).fetchall()
             missing = 0
+        # 封面用一次窗口函数查询取完，避免每个分类都单独查一遍（637 个女优时会慢到数秒）
+        if by == 'actress':
+            cover_key = 'a.name'
+            cover_join = ' JOIN film_actress a ON a.film_id=f.id'
+        elif by == 'studio':
+            cover_key = "coalesce(nullif(f.studio,''),'')"
+            cover_join = ''
+        else:
+            cover_key = "substr(coalesce(f.release_date,''),1,4)"
+            cover_join = ''
+        cover_rows = db.execute(
+            f"""SELECT key, film_id, updated_at FROM (
+                SELECT {cover_key} AS key, f.id AS film_id, f.updated_at AS updated_at,
+                       ROW_NUMBER() OVER (PARTITION BY {cover_key} ORDER BY f.updated_at DESC, f.id) AS rn
+                FROM films f{cover_join}{films_where}
+                {'AND' if films_where else 'WHERE'} f.cover_path<>''
+            ) WHERE rn<=9""", params).fetchall()
+        covers_by_key = {}
+        for item in cover_rows:
+            covers_by_key.setdefault(item['key'] or '', []).append(
+                {'id': item['film_id'], 'v': item['updated_at']})
         items = []
         for row in rows:
             key = row['key'] or ''
             if by == 'actress' and not key:
                 continue
-            covers = [{'id': item['id'], 'v': item['updated_at']} for item in db.execute(
-                f"""SELECT f.id,f.updated_at FROM films f{films_where}
-                {'AND' if films_where else 'WHERE'} f.cover_path<>'' AND """ + (
-                    "EXISTS (SELECT 1 FROM film_actress a WHERE a.film_id=f.id AND a.name=?)" if by == 'actress' else
-                    "coalesce(nullif(f.studio,''),'')=?" if by == 'studio' else
-                    "substr(coalesce(f.release_date,''),1,4)=?"),
-                [*params, key]).fetchall()[:9]]
+            covers = covers_by_key.get(key, [])
             items.append({'key': key, 'name': key or {'actress': '未知女优', 'studio': '未知片商', 'year': '未知年份'}[by],
                           'count': row['count'], 'covers': covers})
         if by == 'actress' and missing:
@@ -1087,13 +1249,16 @@ def groups(by: str, library_id: str = '', query: str = '', folder_id: str = '') 
 
 
 def _nfo_target(film: dict) -> Path:
-    if film.get('nfo_path') and Path(film['nfo_path']).is_file():
-        return Path(film['nfo_path'])
+    """写入目标：始终用唯一的规范 NFO（避免同一部影片出现两个 NFO）。"""
     directory = Path(film['dir_path'])
-    named = directory / f'{Path(film["video_path"]).stem}.nfo'
-    if named.is_file():
-        return named
-    return directory / 'movie.nfo'
+    video = Path(film['video_path'])
+    canonical = canonical_nfo_path(directory, video)
+    if canonical.is_file():
+        return canonical
+    # 多视频目录绝不复用 movie.nfo，否则一部影片的写入会串到别的影片
+    if len(_folder_videos(directory)) <= 1 and film.get('nfo_path') and Path(film['nfo_path']).is_file():
+        return Path(film['nfo_path'])
+    return canonical
 
 
 def _replace_text(root: ET.Element, tag: str, value: str) -> None:
@@ -1106,6 +1271,112 @@ def _replace_text(root: ET.Element, tag: str, value: str) -> None:
     else:
         for match in matches:
             root.remove(match)
+
+
+def _snapshot_nfo(film: dict) -> Path | None:
+    """刮削前把现有 NFO 备份到快照目录，任务结束后用来补齐被引擎覆盖掉的字段。"""
+    source = _nfo_target(film)
+    if not source.is_file():
+        return None
+    try:
+        NFO_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        snapshot = NFO_SNAPSHOT_DIR / f"{film['id']}.nfo"
+        snapshot.write_bytes(source.read_bytes())
+        return snapshot
+    except OSError:
+        return None
+
+
+def _snapshot_path(film_id: str) -> Path:
+    return NFO_SNAPSHOT_DIR / f"{film_id}.nfo"
+
+
+def _drop_snapshot(film_id: str) -> None:
+    try:
+        _snapshot_path(film_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# 这些标签是“多值”结构（每个演员/分类/标签一个节点），缺失时整组补回
+_MULTI_TAGS = {"actor", "genre", "tag"}
+# 只在旧 NFO 有、新 NFO 完全没有时才补回的文本字段
+_TEXT_TAGS = {"title", "originaltitle", "plot", "runtime", "rating", "premiered",
+              "studio", "publisher", "director", "set", "country", "mpaa"}
+
+
+def _merge_nfo_snapshot(film: dict) -> bool:
+    """把刮削前的资料补回新 NFO：只补引擎没有写出的字段，不覆盖新抓到的值。"""
+    snapshot = _snapshot_path(film['id'])
+    if not snapshot.is_file():
+        return False
+    target = _nfo_target(film)
+    if not target.is_file():
+        _drop_snapshot(film['id'])
+        return False
+    # 只允许写回本片的 NFO：同名 NFO 或本片目录下的 movie.nfo
+    video_dir = Path(str(film.get('video_path') or '')).parent
+    stem = Path(str(film.get('video_path') or '')).stem.casefold()
+    if target.parent != video_dir or target.stem.casefold() not in {stem, 'movie'}:
+        _drop_snapshot(film['id'])
+        return False
+    try:
+        old_root = ET.parse(snapshot).getroot()
+    except (OSError, ET.ParseError):
+        _drop_snapshot(film['id'])
+        return False
+    # 快照必须属于本片：番号对不上说明索引/路径错位，宁可放弃合并也不能串号
+    film_dvdid = str(film.get('dvdid') or '').strip().upper()
+    snapshot_dvdid = ''
+    for node in old_root.findall('uniqueid'):
+        if (node.get('type') or '').lower() == 'num' and (node.text or '').strip():
+            snapshot_dvdid = node.text.strip().upper()
+            break
+    if film_dvdid and snapshot_dvdid and film_dvdid != snapshot_dvdid:
+        _drop_snapshot(film['id'])
+        return False
+    try:
+        new_root = ET.parse(target).getroot()
+    except (OSError, ET.ParseError):
+        _drop_snapshot(film['id'])
+        return False
+    changed = False
+    for tag in _TEXT_TAGS:
+        if list(new_root.findall(tag)):
+            continue
+        for node in old_root.findall(tag):
+            if (node.text or '').strip():
+                new_root.append(copy.deepcopy(node))
+                changed = True
+                break
+    for tag in _MULTI_TAGS:
+        if list(new_root.findall(tag)):
+            continue
+        for node in old_root.findall(tag):
+            new_root.append(copy.deepcopy(node))
+            changed = True
+    # uniqueid(type=num/cid) 属于身份字段，新 NFO 缺失时补回
+    existing_ids = {(node.get('type') or '').lower() for node in new_root.findall('uniqueid')}
+    for node in old_root.findall('uniqueid'):
+        kind = (node.get('type') or '').lower()
+        if kind and kind not in existing_ids and (node.text or '').strip():
+            new_root.append(copy.deepcopy(node))
+            changed = True
+    _drop_snapshot(film['id'])
+    if not changed:
+        return False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        backup = target.with_suffix(target.suffix + '.bak')
+        shutil.copy2(target, backup)
+        temporary = target.with_suffix(target.suffix + '.tmp')
+        tree = ET.ElementTree(new_root)
+        ET.indent(tree, space='  ')
+        tree.write(temporary, encoding='utf-8', xml_declaration=True)
+        temporary.replace(target)
+    except OSError:
+        return False
+    return True
 
 
 def _write_nfo(film: dict, values: dict, expected_mtime: float | None) -> Path:
@@ -1243,6 +1514,8 @@ def start_scrape(film_id: str, dvdid: str | None = None, preset_id: str | None =
             film['dvdid'] = value
     forced = film['dvdid'] or None
     preset = preset_id or library_preset_for_folder(film['root_id']) or 'default'
+    # 引擎写 NFO 是整份重建：先留一份旧资料，任务结束后补回没被抓到的字段
+    _snapshot_nfo(film)
     task = tasks.create_task(str(video), preset, source='library', forced_avid=forced,
                              library_film_id=film_id)
     with connection() as db:
