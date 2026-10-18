@@ -192,6 +192,8 @@ class LibraryApiTests(unittest.TestCase):
         film = self.film_by_dvdid('ABC-123')
         calls = []
         with patch.object(self.server, 'IS_DOCKER', False), \
+                patch.object(self.server.os, 'name', 'nt'), \
+                patch.object(self.server.sys, 'platform', 'win32'), \
                 patch.object(self.server, '_focus_opened_folder') as focus, \
                 patch.object(self.server.subprocess, 'Popen', side_effect=lambda args, *a, **k: calls.append(args)):
             response = self.client.post(f'/api/library/films/{film["id"]}/reveal')
@@ -209,14 +211,17 @@ class LibraryApiTests(unittest.TestCase):
         long_target = self.media / 'ABC-123' / ('超长文件名' * 40 + '.mp4')
         long_target.write_bytes(VIDEO_BYTES)
         self.assertGreater(len(str(long_target)), 240)
-        with patch.object(self.server, '_windows_short_path', return_value=r'C:\T\LONG~1.MP4'):
+        with patch.object(self.server.os, 'name', 'nt'), \
+                patch.object(self.server, '_windows_short_path', return_value=r'C:\T\LONG~1.MP4'):
             command = self.server._reveal_command(long_target)
         self.assertEqual(command, ['explorer', '/select,C:\\T\\LONG~1.MP4'])
         # 没有短路径时不再调用 explorer（否则会打开“文档”），而是打开父目录
-        with patch.object(self.server, '_windows_short_path', return_value=''):
+        with patch.object(self.server.os, 'name', 'nt'), \
+                patch.object(self.server, '_windows_short_path', return_value=''):
             self.assertIsNone(self.server._reveal_command(long_target))
             opened = []
             with patch.object(self.server, '_focus_opened_folder'), \
+                    patch.object(self.server.os, 'name', 'nt'), \
                     patch.object(self.server.subprocess, 'Popen') as popen, \
                     patch.object(self.server.os, 'startfile', side_effect=lambda p: opened.append(p), create=True):
                 result = self.server._reveal_in_file_manager(long_target)
@@ -228,7 +233,8 @@ class LibraryApiTests(unittest.TestCase):
         library = self.create_library()
         film = self.film_by_dvdid('ABC-123')
         target = self.media / 'ABC-123' / 'ABC-123.mp4'
-        with patch.object(self.server, '_windows_short_path') as short:
+        with patch.object(self.server.os, 'name', 'nt'), \
+                patch.object(self.server, '_windows_short_path') as short:
             command = self.server._reveal_command(target)
         self.assertEqual(command, ['explorer', f'/select,{target}'])
         self.assertFalse(short.called, '短路径不需要查询 8.3 名称')
