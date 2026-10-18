@@ -618,6 +618,21 @@ class LibraryApiTests(unittest.TestCase):
         local = self.client.get('/api/runtime').json()
         self.assertTrue(local['local_client'], '测试客户端默认视为本机')
 
+    def test_native_path_picker_is_rejected_for_non_local_clients(self):
+        """局域网设备不能弹出宿主机原生的文件夹选择框。"""
+        with patch.object(self.server, '_is_local_client', return_value=False), \
+                patch.object(self.server, '_select_native_paths') as native:
+            single = self.client.post('/api/path/select', json={'kind': 'directory'})
+            multi = self.client.post('/api/path/select-multi', json={'kind': 'directory'})
+        self.assertEqual(single.status_code, 403, single.text)
+        self.assertEqual(multi.status_code, 403, multi.text)
+        self.assertFalse(native.called, '非本机请求不应调用系统对话框')
+        # 本机仍然可用
+        with patch.object(self.server, '_select_native_paths', return_value=['D:/media']):
+            ok = self.client.post('/api/path/select', json={'kind': 'directory'})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        self.assertEqual(ok.json()['path'], 'D:/media')
+
     def test_search_is_case_insensitive(self):
         library = self.create_library()
         for needle in ('def-456', 'DEF-456', 'Def-456'):

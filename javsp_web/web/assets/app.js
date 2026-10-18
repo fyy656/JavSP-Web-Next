@@ -410,7 +410,8 @@ function renderConfigFields() {
       const control = sourcePath === 'crawler.selection' ? crawlerConfigMarkup(value) : (sourcePath === 'translator.engine' ? translatorEngineControl(value) : (boolean ? `<select class="config-field-input" data-config-path="${sourcePath}"><option value="true"${value ? ' selected' : ''}>是</option><option value="false"${value ? '' : ' selected'}>否</option></select>` : (complex ? `<textarea class="config-field-input" data-config-path="${sourcePath}" spellcheck="false">${escapeHtml(inputValue)}</textarea>` : `<input class="config-field-input" data-config-path="${sourcePath}" value="${escapeHtml(inputValue)}"${placeholder ? ` placeholder="${escapeHtml(placeholder)}"` : ''}>`)));
       const description = fieldDescription(sourcePath, value);
       const note = fieldNote(sourcePath, value);
-      const outputDirectoryPicker = sourcePath === 'summarizer.path.output_folder_pattern'
+      const nativePickerAllowed = state.runtime?.local_client !== false;
+      const outputDirectoryPicker = sourcePath === 'summarizer.path.output_folder_pattern' && nativePickerAllowed
         ? `<button class="button secondary config-directory-picker" type="button" data-select-output-directory="${sourcePath}">选择路径</button>`
         : '';
       const ruleControl = isNamingRulePath(sourcePath) ? `<div class="naming-rule-control">${control}${outputDirectoryPicker}${namingRuleHelp(sourcePath)}</div>` : control;
@@ -1165,10 +1166,12 @@ async function loadPathTools() {
     const tools = $('#path-tools');
     tools.classList.remove('hidden');
     const nativeButtons = tools.querySelectorAll('.native-path-button');
-    nativeButtons.forEach((button) => button.classList.toggle('hidden', runtime.docker));
+    // 原生选择框会弹在服务端主机上，局域网客户端不显示
+    const nativeHidden = Boolean(runtime.docker) || runtime.local_client === false;
+    nativeButtons.forEach((button) => button.classList.toggle('hidden', nativeHidden));
     $('#docker-path-browser')?.classList.toggle('hidden', !runtime.docker);
     $('#docker-schedule-path-browser')?.classList.toggle('hidden', !runtime.docker);
-    $('.native-schedule-path-button')?.classList.toggle('hidden', Boolean(runtime.docker));
+    $('.native-schedule-path-button')?.classList.toggle('hidden', nativeHidden);
   } catch (error) {
     console.error(error);
   }
@@ -3087,7 +3090,8 @@ function editAutoScrapeSchedule(schedule = null) {
   $('#auto-scrape-schedule-message').textContent = '';
   renderAutoScrapeSchedulePresets(schedule?.preset_id || 'default');
   $('#delete-auto-scrape-schedule').classList.toggle('hidden', !schedule);
-  $('.native-schedule-path-button').classList.toggle('hidden', Boolean(state.runtime?.docker));
+  $('.native-schedule-path-button').classList.toggle('hidden',
+    Boolean(state.runtime?.docker) || state.runtime?.local_client === false);
   $('#docker-schedule-path-browser')?.classList.toggle('hidden', !state.runtime?.docker);
   $('#auto-scrape-schedule-dialog').showModal();
 }

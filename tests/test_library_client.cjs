@@ -653,6 +653,15 @@ async function main() {
     assert.ok(calls.some((item) => item.toast && /没有可刮削/.test(item.toast)));
   }
 
+  // 22) 手动刮削页：原生选择框只在本机显示
+  {
+    const app = fs.readFileSync(path.join(__dirname, '../javsp_web/web/assets/app.js'), 'utf8');
+    assert.match(app, /nativeHidden = Boolean\(runtime\.docker\) \|\| runtime\.local_client === false/,
+      '原生路径按钮要同时判断 docker 与 local_client');
+    assert.match(app, /nativePickerAllowed = state\.runtime\?\.local_client !== false/,
+      '预设里的“选择路径”按钮也要按本机判断');
+  }
+
   console.log('library client tests passed');
 }
 

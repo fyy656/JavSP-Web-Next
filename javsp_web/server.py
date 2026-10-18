@@ -472,13 +472,18 @@ def _select_native_paths(kind: str, multiple: bool = False) -> list[str]:
 
 
 @app.post("/api/path/select")
-def select_path(body: PathSelectBody, _: dict = Depends(current_user)) -> dict:
+def select_path(body: PathSelectBody, request: Request, _: dict = Depends(current_user)) -> dict:
+    """调用宿主机原生的“选择文件夹/文件”对话框，只允许本机调用。"""
+    if not _is_local_client(request):
+        raise HTTPException(status_code=403, detail="只有运行服务的主机才能使用系统选择框，请直接填写路径")
     paths = _select_native_paths(body.kind)
     return {"path": paths[0] if paths else None}
 
 
 @app.post("/api/path/select-multi")
-def select_multi_paths(body: PathSelectBody, _: dict = Depends(current_user)) -> dict:
+def select_multi_paths(body: PathSelectBody, request: Request, _: dict = Depends(current_user)) -> dict:
+    if not _is_local_client(request):
+        raise HTTPException(status_code=403, detail="只有运行服务的主机才能使用系统选择框，请直接填写路径")
     return {"paths": _select_native_paths(body.kind, multiple=True)}
 
 
