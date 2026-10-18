@@ -1,4 +1,5 @@
 """F10: exercise real handlers, admission races, and proxy trust boundaries."""
+import os
 import ast
 import concurrent.futures
 import tempfile
@@ -190,7 +191,9 @@ class LoginSecurityTests(unittest.TestCase):
                     if isinstance(n, ast.FunctionDef) and n.name == 'run')
         namespace = {'os': __import__('os')}
         exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), 'exec'), namespace)
-        with patch('uvicorn.run') as run:
+        # 单独 exec 出来的函数只带 os：把地址/端口固定成环境变量，避免落到 network_access
+        with patch.dict(os.environ, {'JAVSP_WEB_HOST': '127.0.0.1', 'JAVSP_WEB_PORT': '8090'}), \
+                patch('uvicorn.run') as run:
             namespace['run']()
             self.assertIs(run.call_args.kwargs['proxy_headers'], False)
 
