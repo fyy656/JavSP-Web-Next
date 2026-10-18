@@ -1,6 +1,6 @@
 services:
   javsp-web:
-    image: ghcr.io/fyy656/javsp-web:latest
+    image: ghcr.io/fyy656/javsp-web-next:latest
     container_name: javsp-web
     restart: unless-stopped
     ports:

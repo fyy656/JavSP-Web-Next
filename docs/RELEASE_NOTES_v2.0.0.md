@@ -12,4 +12,4 @@
 - **安全**：登录失败限流（每 5 分钟每 IP 30 次、每用户名 10 次）、会话撤销、配置脱敏、可信代理校验与 HTTPS Secure Cookie。
 - **修复**：短 Cookie 值破坏 AI 网页链接、正式版/体验版渠道切换与版本比较、评论分页与详情页交互、挂载盘路径检查（winError 1005）、多段视频命名带画质后缀的整理问题。
 
-升级方式：Windows 用户下载本页面下的 `JavSP-Web.exe`，保留原 `data` 目录即可；Docker 用户更新镜像为 `ghcr.io/fyy656/javsp-web:2.0.0`。升级前建议备份 `data` 目录。
+升级方式：Windows 用户下载本页面下的 `JavSP-Web.exe`，保留原 `data` 目录即可；Docker 用户更新镜像为 `ghcr.io/fyy656/javsp-web-next:2.0.0`。升级前建议备份 `data` 目录。

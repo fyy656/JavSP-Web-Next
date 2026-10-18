@@ -1145,7 +1145,7 @@ function scheduleGitHubStarInvite() {
       return;
     }
     if (document.querySelector('.github-star-invite')) return;
-    document.body.insertAdjacentHTML('beforeend', '<aside class="github-star-invite" role="status"><button class="icon-button github-star-invite-close" type="button" data-close-github-star-invite title="关闭提示" aria-label="关闭提示"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button><strong>喜欢 JavSP WEB 吗？</strong><p>如果用得顺手，欢迎在 GitHub 点个 Star。</p><div class="github-star-invite-actions"><button class="button secondary" type="button" data-disable-github-star-invite>不再提示</button><a class="button primary" href="https://github.com/fyy656/JavSP-Web" target="_blank" rel="noopener noreferrer">前往 GitHub</a></div></aside>');
+    document.body.insertAdjacentHTML('beforeend', '<aside class="github-star-invite" role="status"><button class="icon-button github-star-invite-close" type="button" data-close-github-star-invite title="关闭提示" aria-label="关闭提示"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button><strong>喜欢 JavSP WEB 吗？</strong><p>如果用得顺手，欢迎在 GitHub 点个 Star。</p><div class="github-star-invite-actions"><button class="button secondary" type="button" data-disable-github-star-invite>不再提示</button><a class="button primary" href="https://github.com/fyy656/JavSP-Web-Next" target="_blank" rel="noopener noreferrer">前往 GitHub</a></div></aside>');
     document.querySelector('[data-close-github-star-invite]')?.addEventListener('click', () => {
       document.querySelector('.github-star-invite')?.remove();
     });

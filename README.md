@@ -2,19 +2,20 @@
 
 # JavSP WEB
 
-在浏览器中刮削影片资料、整理媒体文件并管理媒体库。JavSP WEB 基于 [JavSP](https://github.com/Yuukiy/JavSP)，支持 Windows、Docker 和 NAS 部署。
+在浏览器中刮削影片资料、整理媒体文件并管理媒体库。支持 Windows、Docker 和 NAS 部署。
 
-完整的安装、配置、刮削、AI、自动化、故障排查和接口说明，请查看官网文档：
+> 本项目是**上游开源项目的衍生修改版本**，不是原作者的官方项目，也不代表原作者的观点或背书。
+> 来源、署名与授权说明见下方 [来源与版权](#来源与版权)。
 
-## [打开 JavSP WEB 官网文档](https://fyy656.github.io/JavSP-Web/)
+完整的安装、配置、刮削、AI、自动化、故障排查和接口说明，请看仓库内文档站：`docs/docs.html`（部署到 GitHub Pages 后为 `https://fyy656.github.io/JavSP-Web-Next/docs.html`）。
 
 ## 主要功能
 
 - 识别番号，调用多个资料源获取标题、演员、剧情、封面和剧照。
 - 处理单个视频、文件夹和批量任务，查看进度、日志与失败原因。
-- 在封面墙浏览影片、查看资料和剧照，开启隐私模式模糊图片。
+- 媒体库直接索引磁盘上的视频、NFO 与图片：多库多文件夹、后台扫描、多段视频合并、按番号/标题/女优/路径搜索、按女优/片商/年份分类浏览、隐私模式模糊封面、定位文件、库内单个或**批量刮削**、失败任务一键重试。
 - 在个人中心选择头像，用用户名和 6 位 PIN 创建匿名评论身份；可跨设备查看自己的评论，支持点赞和安全验证。
-- 使用刮削预设管理扫描、命名、NFO、图片和翻译设置。
+- 使用刮削预设管理扫描、命名、NFO、图片和翻译设置；每部影片只维护一个 NFO，Emby / Jellyfin 读取的是同一份资料。
 - 定时扫描目录，连接 qBittorrent，并在下载完成后自动刮削。
 - 连接 Emby / Jellyfin，整理完成后刷新媒体库。
 - 支持 AI 刮削、AI 翻译、上下文自动压缩和模型列表获取。
@@ -24,7 +25,7 @@
 
 ### Windows
 
-1. 从 [Releases](https://github.com/fyy656/JavSP-Web/releases/latest) 下载 `JavSP-Web.exe`。
+1. 从 [Releases](https://github.com/fyy656/JavSP-Web-Next/releases/latest) 下载 `JavSP-Web.exe`。
 2. 双击运行，浏览器打开 `http://127.0.0.1:8090/login`。
 3. 首次使用账号和密码均为 `admin`，登录后立即在“系统设置 → 用户管理”修改密码。
 
@@ -46,7 +47,7 @@ HTTP 为明文传输，请仅在可信的家庭网络中使用；从公网访问
 ```yaml
 services:
   javsp-web:
-    image: ghcr.io/fyy656/javsp-web:latest
+    image: ghcr.io/fyy656/javsp-web-next:latest
     container_name: javsp-web
     restart: unless-stopped
     ports:
@@ -60,34 +61,52 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
-      - ./video:/video
+      - /你的影片目录:/media
 ```
 
-把 `./video` 改成影片目录后执行：
+启动后浏览器打开 `http://服务器地址:8090/login`。`/app/data` 保存配置与任务记录，请务必挂载到宿主机；影片目录按实际路径挂载，多个目录可继续追加 `volumes`。
 
-```sh
-docker compose up -d
+## 来源与版权
+
+### 上游项目
+
+- **JavSP**（刮削核心）：<https://github.com/Yuukiy/JavSP>
+  - 版权归原作者 **Yuukiy** 及 JavSP 贡献者所有。
+- **JavSP-Web**（网页端）：<https://github.com/APecme/JavSP-Web>
+  - 版权归原作者 **APecme** 及 JavSP-Web 贡献者所有。
+
+本项目（`JavSP-Web-Next`）在上述项目基础上做了修改与二次开发，包括媒体库索引与批量刮削、失败重试、分类浏览、NFO 统一、性能优化，以及界面、交互与文档的调整。上游代码与资源按原有许可证分发，**原始著作权、许可证与署名均予以保留**，未声明为原作者官方版本。
+
+### 许可证
+
+本项目及其衍生的上游代码遵循 **GNU General Public License v3.0**：仓库根目录 `LICENSE` 为完整许可证文本，上游刮削核心的许可证见 `vendor/JavSP/LICENSE`，第三方组件的许可证见 `THIRD-PARTY-NOTICES.md`。
+
+### 免责声明
+
+- 本项目与上游项目、任何影片站点、媒体服务器厂商均无隶属或合作关系；相关名称与商标归各自所有者。
+- 本项目仅供个人学习与技术研究使用。使用者应自行确认所处理内容的合法性，并对自己使用本软件的行为负责。
+- 软件按“现状”提供，不附带任何明示或暗示的担保；因使用本软件造成的任何损失由使用者自行承担。
+- 请勿将本软件用于侵犯版权、传播违法内容或其他违反当地法律法规的用途。
+
+## 参与开发
+
+- 反馈与建议请通过本仓库的 Issues 提交；提交日志、截图或配置时请**自行脱敏**（去掉本地路径、域名、账号、番号等隐私信息）。
+- 提交代码前请运行仓库内置测试：
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+node tests/test_web_client.cjs
 ```
 
-访问 `http://服务器地址:8090/login`，使用 `admin` / `admin` 登录并修改密码。容器内路径应填写映射后的路径，例如宿主机 `/mnt/media` 对应 `/video`。
+## 目录结构
 
-通过反向代理提供 HTTPS 时，在环境变量 `JAVSP_WEB_TRUSTED_PROXIES` 中配置代理连接到应用时的实际源 IP（多个 IP 用逗号分隔；默认不信任代理）。代理必须覆盖客户端传入的 `X-Real-IP` 和 `X-Forwarded-Proto`，分别填写真实客户端 IP 和外部协议。应用仅信任这些指定来源，并为 HTTPS 登录设置 Secure Cookie；直接 HTTP 登录仍可用。使用自定义 Uvicorn 启动命令时，须加 `--no-proxy-headers`，以保留应用校验所需的真实连接来源。
-
-登录失败限制为每 5 分钟每 IP 30 次、每用户名 10 次，超限返回 429 和 `Retry-After`。成功登录不消耗失败额度，计数保存在当前进程内，重启会清零；当前单进程部署适用，多进程或多副本部署须先改用共享限流存储。
-
-## 贡献
-
-欢迎提交 Issue、改进文档、补充测试或提交 Pull Request。请先搜索已有 Issue，并在反馈中附上版本、部署方式、复现步骤和脱敏日志；不要上传密钥、Cookie 或完整数据目录。
-
-运行测试请使用 Python 3.11 或 3.12（与 Docker 一致推荐 3.12），并在隔离环境中安装应用及测试依赖。测试使用 Python 3.11 新增的 `unittest.TestCase.enterContext`，不能直接用 Python 3.8 运行。
-
-```sh
-python -m pip install -r requirements.txt -r tests/requirements.txt
-python -m unittest discover -s tests -v
-python scripts/build_demo.py
-node tests/test_demo.cjs
 ```
-
-官网文档源文件位于 `docs/`，内置 Skills 位于 `javsp_web/skills/`。提交前请同步更新受影响的文档和示例。
-
-项目包含 JavSP 核心，遵循 [GPL-3.0](./vendor/JavSP/LICENSE) 与 [Anti 996 License](https://github.com/996icu/996.ICU/blob/master/LICENSE_CN) 的相关条款。
+javsp_web/           Web 服务与前端资源
+  web/               前端页面与静态资源
+  library_store.py   媒体库索引（以磁盘为准）
+  tasks.py           任务调度与引擎调用
+vendor/JavSP/        上游刮削核心（保留原许可证）
+docs/                文档站点（GitHub Pages）与发布说明
+scripts/             构建、演示站点与维护脚本
+tests/               单元测试与前端回归测试
+```

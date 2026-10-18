@@ -32,5 +32,5 @@
 ## 升级方式
 
 - Windows：下载本页面的 `JavSP-Web.exe`，保留原 `data` 目录即可。
-- Docker：`docker pull ghcr.io/fyy656/javsp-web:2.1.0`（或 `:latest`）。
+- Docker：`docker pull ghcr.io/fyy656/javsp-web-next:2.1.0`（或 `:latest`）。
 - 从旧版本升级后建议对媒体库执行一次「扫描」，让索引按新的 NFO 归属规则重建；升级前请备份 `data` 目录。

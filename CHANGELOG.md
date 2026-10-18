@@ -54,6 +54,6 @@
 ### 升级说明
 
 从 1.x 升级只需保留原有 `data` 数据目录；首次启动后媒体库会在第一次扫描时自动建立索引。
-升级前建议备份 `data` 目录。使用 GitHub Release 中 `v2.0.0` 标签下的 Windows 单文件版，或将 Docker 镜像更新为 `ghcr.io/fyy656/javsp-web:2.0.0`。
+升级前建议备份 `data` 目录。使用 GitHub Release 中 `v2.0.0` 标签下的 Windows 单文件版，或将 Docker 镜像更新为 `ghcr.io/fyy656/javsp-web-next:2.0.0`。
 
-[2.0.0]: https://github.com/fyy656/JavSP-Web/releases/tag/v2.0.0
+[2.0.0]: https://github.com/fyy656/JavSP-Web-Next/releases/tag/v2.0.0

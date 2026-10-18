@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="subpages.css?v=topics-20261010">
 </head>
 <body class="docs-page">
-  <header class="site-header"><a class="brand" href="index.html" aria-label="JavSP WEB 首页"><img src="assets/javsp-logo.png" alt=""><span>JavSP <b>WEB</b></span></a><button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav">菜单</button><nav id="site-nav" class="site-nav" aria-label="主导航"><a href="index.html">首页</a><a class="is-current" href="docs.html">文档</a><a href="demo.html">示例站点</a><a class="nav-github" href="https://github.com/fyy656/JavSP-Web" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a></nav></header>
+  <header class="site-header"><a class="brand" href="index.html" aria-label="JavSP WEB 首页"><img src="assets/javsp-logo.png" alt=""><span>JavSP <b>WEB</b></span></a><button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav">菜单</button><nav id="site-nav" class="site-nav" aria-label="主导航"><a href="index.html">首页</a><a class="is-current" href="docs.html">文档</a><a href="demo.html">示例站点</a><a class="nav-github" href="https://github.com/fyy656/JavSP-Web-Next" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a></nav></header>
   <main class="docs-shell page-width">
 <aside class="doc-nav" aria-label="教程导航"><a class="doc-home-link" href="docs.html">← 教程目录</a><div class="doc-nav-group"><a class="doc-topic-link" href="guide-install.html">安装与部署</a></div><div class="doc-nav-group is-active-topic"><a class="doc-topic-link" href="guide-scraping.html" aria-current="page">刮削与整理</a><a class="doc-chapter-link" href="#library">媒体库：目录索引</a><a class="doc-chapter-link" href="#manual">手动刮削与任务</a><a class="doc-chapter-link" href="#mounted">挂载盘、STRM 与分 P</a><a class="doc-chapter-link" href="#preset">刮削预设与分类</a><a class="doc-chapter-link" href="#crawlers">爬虫与网络</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-ai.html">AI 助手</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-automation.html">自动化与集成</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-maintenance.html">维护与排错</a></div><a class="doc-demo-link" href="demo.html">打开交互示例 →</a></aside>
 <article class="doc-content"><header class="doc-topic-heading"><p class="eyebrow">使用教程 / 02</p><h1>刮削与整理</h1><p class="doc-lede">从单次任务到批量整理，了解预设、分类、分 P 与爬虫之间的关系。</p></header>
@@ -57,7 +57,7 @@
         <h3>已有影片覆盖方式</h3>
         <p>在“文件夹整理”中选择冲突处理策略。“从不”保留已有影片、封面和 NFO，跳过整理并保留源文件；“总是”替换已有版本；“按文件大小”保留较大的影片；“仅保留最新”比较文件修改时间，保留较新的影片。大小或时间相同时保留已有版本。多段影片统一检查，只要有一段需要保留就跳过整部影片，避免混合不同版本。同一文件名的不同视频扩展名也会参与比较；已有目录不会被整体删除。</p>
         <p>保留已有影片时对应图片与资料不改写。替换已有影片后，任务不提供“还原文件”，避免清理原有资料。关闭“移动文件到整理目录”时，上述策略不参与原地资料更新。</p>
-        <p>输出模板和硬链接有文件系统要求，使用前核对输入与输出磁盘及权限。更多核心字段说明可查阅 <a href="https://github.com/Yuukiy/JavSP/wiki" target="_blank" rel="noreferrer">JavSP Wiki</a>。</p>
+        <p>输出模板和硬链接有文件系统要求，使用前核对输入与输出磁盘及权限；模板中可用的字段与本文“刮削预设”一节列出的字段一致。</p>
       </section>
 <section id="crawlers"><h2>爬虫与网络：先单独测试，再运行整批</h2>
         <ol><li>进入“爬虫配置”，选择具体爬虫，输入一个确定存在的番号并运行测试。</li><li>查看抓取字段和运行输出：是否取得标题、封面，是否出现 403、超时或解析异常。</li><li>在“刮削预设 → 爬虫”调整该分类使用的数据源与顺序；爬虫配置页管理代码，预设页决定任务使用哪些爬虫。</li><li>自定义爬虫保存后再单独测试；仅保存代码不代表能抓到资料。内置爬虫只读，可移除和恢复。</li></ol>

@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="subpages.css?v=topics-20261010">
 </head>
 <body class="docs-page">
-  <header class="site-header"><a class="brand" href="index.html" aria-label="JavSP WEB 首页"><img src="assets/javsp-logo.png" alt=""><span>JavSP <b>WEB</b></span></a><button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav">菜单</button><nav id="site-nav" class="site-nav" aria-label="主导航"><a href="index.html">首页</a><a class="is-current" href="docs.html">文档</a><a href="demo.html">示例站点</a><a class="nav-github" href="https://github.com/fyy656/JavSP-Web" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a></nav></header>
+  <header class="site-header"><a class="brand" href="index.html" aria-label="JavSP WEB 首页"><img src="assets/javsp-logo.png" alt=""><span>JavSP <b>WEB</b></span></a><button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav">菜单</button><nav id="site-nav" class="site-nav" aria-label="主导航"><a href="index.html">首页</a><a class="is-current" href="docs.html">文档</a><a href="demo.html">示例站点</a><a class="nav-github" href="https://github.com/fyy656/JavSP-Web-Next" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a></nav></header>
   <main class="docs-shell page-width">
 <aside class="doc-nav" aria-label="教程导航"><a class="doc-home-link" href="docs.html">← 教程目录</a><div class="doc-nav-group is-active-topic"><a class="doc-topic-link" href="guide-install.html" aria-current="page">安装与部署</a><a class="doc-chapter-link" href="#start">开始使用</a><a class="doc-chapter-link" href="#windows">Windows 本机部署</a><a class="doc-chapter-link" href="#docker">Docker / Compose</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-scraping.html">刮削与整理</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-ai.html">AI 助手</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-automation.html">自动化与集成</a></div><div class="doc-nav-group"><a class="doc-topic-link" href="guide-maintenance.html">维护与排错</a></div><a class="doc-demo-link" href="demo.html">打开交互示例 →</a></aside>
 <article class="doc-content"><header class="doc-topic-heading"><p class="eyebrow">使用教程 / 01</p><h1>安装与部署</h1><p class="doc-lede">在 Windows 电脑、服务器或 NAS 上安装 JavSP WEB，设置影片目录并完成首次登录。</p></header>
@@ -28,13 +28,13 @@
         <div class="doc-command"><code>http://127.0.0.1:8090/login</code><button class="copy-button" data-copy="http://127.0.0.1:8090/login">复制地址</button></div>
         <p>EXE 的配置和任务数据默认保存在程序旁的 <code>data</code> 目录。关闭浏览器不等于退出程序；通过通知区域菜单退出后再替换 EXE。EXE 可检查新版本，但不能通过网页安装，需下载后手动替换并保留数据目录。</p>
         <p>页面打不开时先检查程序是否运行、8090 端口是否被占用。EXE 默认监听本机地址；需要长期供其他设备使用时，建议使用 Docker 部署。</p>
-        <a class="text-link" href="https://github.com/fyy656/JavSP-Web/releases/latest" target="_blank" rel="noreferrer">下载 Windows 正式版 <span>↗</span></a>
+        <a class="text-link" href="https://github.com/fyy656/JavSP-Web-Next/releases/latest" target="_blank" rel="noreferrer">下载 Windows 正式版 <span>↗</span></a>
       </section>
 <section id="docker"><h2>使用 Docker Compose 安装</h2>
         <p>安装 Docker 与 Compose 插件后，新建工作文件夹，并将以下内容保存为 <code>docker-compose.yml</code>。此配置使用 <code>latest</code> 正式版镜像。</p>
         <pre class="doc-example"><code>services:
   javsp-web:
-    image: ghcr.io/fyy656/javsp-web:latest
+    image: ghcr.io/fyy656/javsp-web-next:latest
     container_name: javsp-web
     restart: unless-stopped
     ports:
