@@ -3118,7 +3118,7 @@ function showView(view) {
   if (view === 'ai-scrape') window.JavspAI?.load();
   if (view === 'settings') window.JavspAI?.loadSettings();
   if (view === 'presets') { loadPresets(); loadCrawlerNames(); }
-  if (view === 'settings') { ensureMediaSettingsUi(); ensurePathMappingsUi(); loadUsers(); loadDownloaders(); loadMediaServers(); loadPathMappings(); loadCookieCloud(); loadUpdateSettings(); }
+  if (view === 'settings') { ensureMediaSettingsUi(); ensurePathMappingsUi(); loadUsers(); loadDownloaders(); loadMediaServers(); loadPathMappings(); loadCookieCloud(); loadUpdateSettings(); loadNetworkSettings(); }
   localStorage.setItem('javsp-web.active-view', view);
 }
 
@@ -3883,6 +3883,61 @@ $('#update-experience')?.addEventListener('change', () => $('#update-settings-fo
 $('#update-check-now')?.addEventListener('click', checkUpdateNow);
 $('#update-apply-now')?.addEventListener('click', applyUpdateNow);
 $('#update-overlay-close')?.addEventListener('click', closeUpdateOverlay);
+
+// ---------------------------------------------------------------- 局域网访问
+function renderLanAddresses(data) {
+  const box = $('#lan-addresses');
+  const enabled = data.settings?.lan_access === true;
+  const addresses = data.addresses || [];
+  box.innerHTML = '';
+  if (!enabled || !addresses.length) { box.hidden = true; return; }
+  box.hidden = false;
+  const title = document.createElement('p');
+  title.className = 'muted';
+  title.textContent = '局域网访问地址（同一网络下的设备可用）：';
+  box.appendChild(title);
+  addresses.forEach((address) => {
+    const row = document.createElement('div');
+    row.className = 'lan-address-row';
+    const text = document.createElement('code');
+    text.textContent = address;
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'button secondary';
+    copy.textContent = '复制';
+    copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(address); copy.textContent = '已复制'; }
+      catch (_) { copy.textContent = '复制失败'; }
+      window.setTimeout(() => { copy.textContent = '复制'; }, 2000);
+    });
+    row.append(text, copy);
+    box.appendChild(row);
+  });
+}
+
+async function loadNetworkSettings() {
+  try {
+    const data = await api('/api/network/settings');
+    $('#lan-access-enabled').checked = data.settings?.lan_access === true;
+    $('#lan-status-badge').textContent = data.settings?.lan_access ? '局域网已开启' : '仅本机';
+    $('#lan-firewall-status').textContent = data.firewall?.message || '';
+    renderLanAddresses(data);
+  } catch (error) { $('#network-settings-message').textContent = error.message; }
+}
+
+$('#network-settings-form')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const message = $('#network-settings-message');
+  try {
+    const result = await api('/api/network/settings', { method: 'PUT', body: JSON.stringify({ lan_access: $('#lan-access-enabled').checked }) });
+    $('#lan-status-badge').textContent = result.settings.lan_access ? '局域网已开启' : '仅本机';
+    $('#lan-firewall-status').textContent = result.firewall?.message || '';
+    if (result.firewall?.error) { message.textContent = `已保存，但防火墙规则添加失败：${result.firewall.error}`; return; }
+    message.textContent = result.settings.lan_access ? '已开启局域网访问，重启程序后生效' : '已关闭局域网访问';
+    const data = await api('/api/network/settings');
+    renderLanAddresses(data);
+  } catch (error) { message.textContent = error.message; }
+});
 
 document.addEventListener('submit', async (event) => {
   if (event.target.id === 'path-mappings-form') {

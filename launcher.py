@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import webbrowser
 import sys
@@ -57,15 +58,18 @@ def main() -> None:
         raise SystemExit("托盘版本需要安装 pystray 和 Pillow") from exc
 
     from javsp_web.server import app
+    from javsp_web.network_access import effective_host, listen_port
 
     # Windowed PyInstaller builds have no stdout/stderr TTY. Uvicorn's default
     # formatter calls isatty() during logging setup, so disable that setup for
     # the tray-hosted server.
+    host = os.environ.get("JAVSP_WEB_HOST") or effective_host()
+    port = int(os.environ.get("JAVSP_WEB_PORT") or listen_port())
     server = uvicorn.Server(
         uvicorn.Config(
             app,
-            host="127.0.0.1",
-            port=8090,
+            host=host,
+            port=port,
             log_config=None,
             access_log=False,
             proxy_headers=False,

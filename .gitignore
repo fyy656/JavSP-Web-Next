@@ -8,6 +8,7 @@ build-*.log
 data/users.json
 data/tasks.json
 data/presets.json
+data/network-settings.json
 data/config.yml
 data/task-config/
 data/task-covers/

@@ -55,6 +55,12 @@
         <div class="doc-note"><b>路径示例</b><span>宿主机 <code>/mnt/media/待整理</code> → 容器 <code>/video/待整理</code>。在“待处理路径”和定时规则中填后者。输入和输出目录都应挂载，容器需有相应写入权限。</span></div>
         <p><code>./data:/app/data</code> 用于保存账号、配置和任务记录，重新创建容器时请保留左侧的 <code>data</code> 文件夹。启动失败可查看 <code>docker compose logs --tail 100 javsp-web</code>。如何更新或切换正式版、体验版，见<a href="guide-maintenance.html#updates">更新与备份</a>。</p>
       </section>
+<section id="lan"><h2>局域网访问</h2>
+        <p>默认情况下程序只监听 <code>127.0.0.1</code>，仅运行程序的这台电脑可以访问。需要手机、平板或局域网内其他设备访问时，按以下步骤开启：</p>
+        <ol><li>登录后进入“系统设置 → 网络访问”，勾选“允许局域网访问”并保存。Windows 会尝试自动添加防火墙规则（需要管理员权限）；如果失败，按界面提示在管理员 PowerShell 中手动执行 <code>netsh advfirewall firewall add rule</code> 命令即可。</li><li>重启程序。设置面板会列出形如 <code>http://192.168.x.x:8090</code> 的地址，点击“复制”分享给同一网络下的设备，用该地址登录即可。</li></ol>
+        <div class="doc-note"><b>安全提醒</b><span>HTTP 为明文传输，账号密码和刮削内容可能被同一网络内的其他设备嗅探，请仅在可信的家庭网络中使用。从公网或不可信网络访问时，务必通过反向代理提供 HTTPS，并在 <code>JAVSP_WEB_TRUSTED_PROXIES</code> 中配置代理地址，详见 README 的反向代理说明。</span></div>
+        <p>Docker 部署本身已可通过 <code>http://服务器地址:8090</code> 访问，监听地址由 <code>JAVSP_WEB_HOST</code> 决定；“网络访问”开关只影响 Windows 桌面版的防火墙规则。关闭开关并保存后，程序会在下次启动时恢复为仅本机访问，并尽力移除已添加的防火墙规则。</p>
+      </section>
 <nav class="doc-pager" aria-label="相邻主题"><a href="docs.html"><small>返回</small>教程目录</a><a href="guide-scraping.html"><small>下一主题</small>刮削与整理 →</a></nav></article>
 </main>
   <footer class="site-footer"><div class="page-width footer-inner"><span>© 2026 fyy656 · JavSP WEB</span><span>GPL-3.0 / Anti 996 License</span><a href="index.html">返回首页 →</a></div></footer>

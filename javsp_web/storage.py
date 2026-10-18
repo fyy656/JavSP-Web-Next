@@ -35,6 +35,7 @@ COOKIECLOUD_FILE = DATA_DIR / "cookiecloud.json"
 CUSTOM_CRAWLERS_DIR = DATA_DIR / "crawlers"
 CRAWLER_SETTINGS_FILE = DATA_DIR / "crawler-settings.json"
 UPDATE_SETTINGS_FILE = DATA_DIR / "update-settings.json"
+NETWORK_SETTINGS_FILE = DATA_DIR / "network-settings.json"
 _lock = threading.RLock()
 
 
@@ -147,6 +148,24 @@ def save_update_settings(settings: dict[str, Any]) -> dict[str, Any]:
         if isinstance(settings.get('last_result'), dict):
             current['last_result'] = settings['last_result']
         _write_json(UPDATE_SETTINGS_FILE, current)
+        return current
+
+
+def get_network_settings() -> dict[str, Any]:
+    """局域网访问偏好。默认关闭：程序只监听 127.0.0.1，仅本机可访问。"""
+    ensure_seed_data()
+    with _lock:
+        saved = _read_json(NETWORK_SETTINGS_FILE, {})
+        if not isinstance(saved, dict):
+            saved = {}
+        return {"lan_access": bool(saved.get("lan_access", False))}
+
+
+def save_network_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    with _lock:
+        current = get_network_settings()
+        current["lan_access"] = bool(settings.get("lan_access", current["lan_access"]))
+        _write_json(NETWORK_SETTINGS_FILE, current)
         return current
 
 

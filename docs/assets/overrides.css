@@ -1,4 +1,20 @@
 /* Late-loaded UI refinements for task filtering and liquid progress surfaces. */
+.lan-addresses { display: flex; flex-direction: column; gap: 6px; }
+.lan-addresses .lan-address-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.lan-addresses .lan-address-row code {
+  padding: 6px 9px;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+  border-radius: 8px;
+  background: var(--surface-muted);
+  font-size: 13px;
+  word-break: break-all;
+}
+.lan-addresses .lan-address-row .button { padding: 5px 12px; font-size: 12px; }
 .translator-engine-control select:disabled,
 .translator-engine-control input:disabled {
   background: var(--surface-muted);

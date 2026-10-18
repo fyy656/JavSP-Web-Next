@@ -28,6 +28,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from . import __version__
 from .auth import SESSION_COOKIE, create_session, current_user, remove_session, require_admin
 from .login_security import login_context, login_limiter
+from . import network_access
 from .config_validation import load_base_config, validate_config_data, yaml_error_message
 from .cookiecloud import CookieCloudError, cookiecloud_summary, fetch_cookiecloud, get_synced_cookies, sync_status, start_scheduler as start_cookiecloud_scheduler
 from .storage import (
@@ -61,6 +62,8 @@ from .storage import (
     save_qbittorrent_settings,
     save_cookiecloud_settings,
     save_update_settings,
+    save_network_settings,
+    get_network_settings,
     save_disabled_built_in_crawlers,
     save_downloaders,
     save_path_mappings,
@@ -376,6 +379,34 @@ def update_settings(body: UpdateSettingsBody, _: dict = Depends(require_admin)) 
 @app.post("/api/update/check")
 def check_update(_: dict = Depends(require_admin)) -> dict:
     return updater.check(force=True)
+
+
+class NetworkSettingsBody(BaseModel):
+    lan_access: bool = False
+
+
+@app.get("/api/network/settings")
+def network_settings(_: dict = Depends(current_user)) -> dict:
+    """局域网访问设置、可用的本机访问地址与防火墙状态（地址在开启前即可预览）。"""
+    port = network_access.listen_port()
+    return {
+        "settings": get_network_settings(),
+        "port": port,
+        "addresses": network_access.lan_addresses(port),
+        "firewall": network_access.firewall_status(port),
+        "deployment": "docker" if IS_DOCKER else ("exe" if IS_FROZEN else "python"),
+    }
+
+
+@app.put("/api/network/settings")
+def update_network_settings(body: NetworkSettingsBody, _: dict = Depends(require_admin)) -> dict:
+    """保存局域网访问偏好；开启/关闭时同步维护 Windows 防火墙规则。
+
+    监听地址在下次启动时生效（Docker 部署由 JAVSP_WEB_HOST 决定，不受此开关影响）。
+    """
+    settings = save_network_settings(body.model_dump())
+    firewall = network_access.apply_lan_access(settings["lan_access"])
+    return {"settings": settings, "firewall": firewall}
 
 
 @app.post("/api/update/apply")
@@ -2896,8 +2927,8 @@ def run() -> None:
 
     uvicorn.run(
         "javsp_web.server:app",
-        host=os.environ.get("JAVSP_WEB_HOST", "127.0.0.1"),
-        port=int(os.environ.get("JAVSP_WEB_PORT", "8090")),
+        host=os.environ.get("JAVSP_WEB_HOST") or network_access.effective_host(),
+        port=int(os.environ.get("JAVSP_WEB_PORT") or network_access.listen_port()),
         reload=False,
         proxy_headers=False,  # Preserve the socket peer for our explicit proxy allowlist.
     )

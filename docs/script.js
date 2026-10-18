@@ -41,7 +41,7 @@ document.querySelectorAll('.copy-button').forEach((button) => button.addEventLis
 
 if (document.querySelector('.guide-directory')) {
   const chapterPages = {
-    start: 'guide-install.html', windows: 'guide-install.html', docker: 'guide-install.html',
+    start: 'guide-install.html', windows: 'guide-install.html', docker: 'guide-install.html', lan: 'guide-install.html',
     manual: 'guide-scraping.html', mounted: 'guide-scraping.html', preset: 'guide-scraping.html', crawlers: 'guide-scraping.html',
     library: 'guide-scraping.html',
     ai: 'guide-ai.html', 'ai-translation': 'guide-ai.html', 'ai-search': 'guide-ai.html', 'ai-context': 'guide-ai.html', 'ai-skills': 'guide-ai.html',
