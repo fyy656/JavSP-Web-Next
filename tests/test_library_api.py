@@ -208,9 +208,15 @@ class LibraryApiTests(unittest.TestCase):
         """explorer 对超长路径会失败并退回“文档”，这里改用 8.3 短路径。"""
         library = self.create_library()
         film = self.film_by_dvdid('ABC-123')
-        long_target = self.media / 'ABC-123' / ('超长文件名' * 40 + '.mp4')
+        # 用多层目录把整体路径拉长；单个文件名保持较短，避免 Linux 的 255 字节上限
+        deep = self.media
+        for _ in range(5):
+            deep = deep / ('深いディレクトリ' * 6)
+        deep.mkdir(parents=True, exist_ok=True)
+        long_target = deep / 'ABC-123.mp4'
         long_target.write_bytes(VIDEO_BYTES)
         self.assertGreater(len(str(long_target)), 240)
+        self.assertLess(max(len(part.encode()) for part in long_target.parts), 255)
         with patch.object(self.server.os, 'name', 'nt'), \
                 patch.object(self.server, '_windows_short_path', return_value=r'C:\T\LONG~1.MP4'):
             command = self.server._reveal_command(long_target)
@@ -226,8 +232,8 @@ class LibraryApiTests(unittest.TestCase):
                     patch.object(self.server.os, 'startfile', side_effect=lambda p: opened.append(p), create=True):
                 result = self.server._reveal_in_file_manager(long_target)
             self.assertFalse(popen.called, '没有短路径时不应再交给 explorer')
-            self.assertEqual(opened, [str(self.media / 'ABC-123')])
-            self.assertEqual(result, self.media / 'ABC-123')
+            self.assertEqual(opened, [str(long_target.parent)], '应打开影片所在目录')
+            self.assertEqual(result, long_target.parent)
 
     def test_reveal_keeps_short_paths_untouched(self):
         library = self.create_library()
