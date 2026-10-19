@@ -1177,6 +1177,12 @@ async function loadPathTools() {
   }
 }
 
+// 会操作宿主机文件的功能（还原文件、删除图片等）只对主机上的页面开放
+function hostFileActionsAllowed() {
+  const runtime = state.runtime;
+  return Boolean(runtime) && !runtime.docker && runtime.local_client === true;
+}
+
 function clearManualFileSelection() {
   state.manualInputFiles = [];
   const message = $('#task-selection-message');
@@ -2320,7 +2326,9 @@ async function openTaskDetail(taskId, background = false) {
   const fileInfo = [['文件名', task.file_name || task.name], ['原始路径', task.input_directory], ['整理路径', task.progress?.output?.save_dir]].map(([name,value]) => `<div class="detail-data-row"><dt>${name}</dt><dd>${escapeHtml(value || '—')}</dd></div>`).join('');
   const taskLog = taskLogMarkup(task, `detail-${task.id}`, 'task-detail-log');
   const googleCover = task.task_type !== 'media' && !task.cover_count ? `<div class="google-cover-action"><button class="button secondary task-google-cover" type="button" data-google-cover-task="${escapeHtml(task.id)}">使用全部爬虫搜索封面</button></div>` : '';
-  const restore = task.restore_available ? `<button class="button danger" type="button" data-restore-task-files="${escapeHtml(task.id)}">还原文件</button>` : '';
+  const restore = task.restore_available && hostFileActionsAllowed()
+    ? `<button class="button danger" type="button" data-restore-task-files="${escapeHtml(task.id)}">还原文件</button>`
+    : '';
   const heading = taskDetailHeading(task);
   $('#task-detail-title').textContent = heading.title;
   $('#task-detail-subtitle').textContent = heading.subtitle;
@@ -3130,7 +3138,7 @@ function ensurePathMappingsUi() {
   const settingsPanel = document.querySelector('[data-panel="settings"]');
   if (!settingsPanel || $('#path-mapping-panel')) return;
   const anchor = $('#media-server-panel');
-  const markup = '<div id="path-mapping-panel" class="panel narrow"><div class="panel-heading"><div><h2>路径映射</h2><p class="muted">下载器和本程序看到的文件路径不同时，在这里设置对应关系。</p></div><button class="button secondary" id="add-path-mapping" type="button">添加映射</button></div><form id="path-mappings-form" class="stack"><div id="path-mapping-list" class="path-mapping-list"></div><div class="form-actions"><button class="button primary" type="submit">保存路径映射</button><span id="path-mapping-message" class="muted"></span></div></form></div>';
+  const markup = '<div id="path-mapping-panel" class="panel narrow"><div class="panel-heading"><div><h2>路径映射</h2><p class="muted">仅用于下载器（qBittorrent 等）与整理后刷新媒体服务器：两套程序看到同一份文件的不同路径时在这里建立对应关系。媒体库播放按“绝对路径 → 文件名 → 番号唯一命中”匹配，<b>不需要</b>在这里配置。</p></div><button class="button secondary" id="add-path-mapping" type="button">添加映射</button></div><form id="path-mappings-form" class="stack"><div id="path-mapping-list" class="path-mapping-list"></div><div class="form-actions"><button class="button primary" type="submit">保存路径映射</button><span id="path-mapping-message" class="muted"></span></div></form></div>';
   if (anchor) anchor.insertAdjacentHTML('afterend', markup); else settingsPanel.insertAdjacentHTML('afterbegin', markup);
 }
 

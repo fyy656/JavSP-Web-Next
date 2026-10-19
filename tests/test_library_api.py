@@ -633,6 +633,84 @@ class LibraryApiTests(unittest.TestCase):
         self.assertEqual(ok.status_code, 200, ok.text)
         self.assertEqual(ok.json()['path'], 'D:/media')
 
+    def test_file_operations_are_local_only(self):
+        """还原文件、删除图片这类操作会动宿主机文件，非本机请求必须 403。"""
+        library = self.create_library()
+        film = self.film_by_dvdid('ABC-123')
+        task_id = self.client.post(f'/api/library/films/{film["id"]}/scrape', json={}).json()['task_id']
+        with patch.object(self.server, '_is_local_client', return_value=False), \
+                patch.object(self.server, 'restore_task_files') as restore, \
+                patch.object(self.server, 'edit_task_artwork') as artwork:
+            remote_restore = self.client.post(f'/api/tasks/{task_id}/restore')
+            remote_artwork = self.client.delete(f'/api/tasks/{task_id}/artwork/cover/0')
+        self.assertEqual(remote_restore.status_code, 403, remote_restore.text)
+        self.assertEqual(remote_artwork.status_code, 403, remote_artwork.text)
+        self.assertFalse(restore.called, '非本机请求不应移动文件')
+        self.assertFalse(artwork.called, '非本机请求不应删除图片')
+        # 本机仍然可用
+        with patch.object(self.server, 'restore_task_files', return_value=True) as restore:
+            local = self.client.post(f'/api/tasks/{task_id}/restore')
+        self.assertEqual(local.status_code, 200, local.text)
+        self.assertTrue(restore.called)
+
+    def test_library_film_playback_route(self):
+        """播放接口：能解析到媒体服务器就返回地址，解析不到给出明确提示。"""
+        library = self.create_library()
+        film = self.film_by_dvdid('ABC-123')
+        payload = {'mode': 'emby', 'item_id': '9', 'url': 'http://emby/videos/9/master.mp4?api_key=K',
+                   'transcoding': True, 'server_name': '客厅'}
+        with patch.object(self.server, 'film_playback', return_value=payload):
+            response = self.client.get(f'/api/library/films/{film["id"]}/playback')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['mode'], 'emby')
+        with patch.object(self.server, 'film_playback', side_effect=ValueError('没有在已连接的 Emby 里找到这部影片')):
+            missing = self.client.get(f'/api/library/films/{film["id"]}/playback')
+        self.assertEqual(missing.status_code, 409, missing.text)
+        self.assertIn('Emby', missing.json()['detail'])
+
+    def test_local_stream_supports_range_requests(self):
+        """本地直连：只允许索引里的文件，支持 Range（拖动进度）。"""
+        library = self.create_library()
+        film = self.film_by_dvdid('ABC-123')
+        full = self.client.get(f'/api/library/films/{film["id"]}/stream')
+        self.assertEqual(full.status_code, 200, full.text)
+        self.assertEqual(full.headers.get('content-type'), 'video/mp4')
+        partial = self.client.get(f'/api/library/films/{film["id"]}/stream', headers={'Range': 'bytes=0-99'})
+        self.assertEqual(partial.status_code, 206, partial.text)
+        self.assertEqual(partial.headers.get('content-range', '').split('/')[0], 'bytes 0-99')
+
+    def test_local_stream_rejects_unsupported_containers(self):
+        """浏览器放不了的容器不让直连，交给 Emby 转码。"""
+        folder = self.media / 'MKV-001'
+        folder.mkdir()
+        (folder / 'MKV-001.mkv').write_bytes(VIDEO_BYTES)
+        write_nfo(folder / 'MKV-001.nfo', 'MKV-001', 'Matroska')
+        library = self.create_library()
+        film = self.film_by_dvdid('MKV-001')
+        response = self.client.get(f'/api/library/films/{film["id"]}/stream')
+        self.assertEqual(response.status_code, 415, response.text)
+
+    def test_playback_prefers_local_for_mp4(self):
+        """mp4 默认走本地直连，不需要 Emby。"""
+        library = self.create_library()
+        film = self.film_by_dvdid('ABC-123')
+        response = self.client.get(f'/api/library/films/{film["id"]}/playback')
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload['mode'], 'local')
+        self.assertEqual(payload['url'], f'/api/library/films/{film["id"]}/stream')
+        self.assertEqual(payload['fallback_mode'], 'emby')
+
+    def test_playback_stop_route(self):
+        """关闭播放器：接口把停止请求转发给媒体服务器。"""
+        library = self.create_library()
+        film = self.film_by_dvdid('ABC-123')
+        with patch.object(self.server, 'stop_playback', return_value={'ok': True, 'results': []}) as stop:
+            response = self.client.post(f'/api/library/films/{film["id"]}/playback/stop',
+                                        json={'server_id': 's1', 'play_session_id': 'ps-1'})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(stop.call_args.args, ('s1', 'ps-1'))
+
     def test_search_is_case_insensitive(self):
         library = self.create_library()
         for needle in ('def-456', 'DEF-456', 'Def-456'):

@@ -22,6 +22,7 @@ import yaml
 from croniter import croniter
 from fastapi import Cookie, Depends, FastAPI, File, UploadFile, HTTPException, Query, Request, Response, WebSocket, status
 from fastapi.responses import FileResponse, HTMLResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.gzip import GZipMiddleware
@@ -77,7 +78,7 @@ from .storage import (
     write_config,
 )
 from .qbittorrent import QbittorrentError, delete_torrent, list_downloads, set_share_limits, set_torrent_transfer_limits, test_connection
-from .media import connection_error, list_media_libraries, overview_libraries, playback_links, sync_media_server, media_sessions, seek_media
+from .media import LOCAL_PLAYABLE_SUFFIXES, connection_error, film_playback, list_media_libraries, overview_libraries, playback_links, stop_playback, sync_media_server, media_sessions, seek_media
 from .tasks import NoScrapeTasksError, active_schedule_task_ids, cancel_task, cancel_tasks, create_tasks, delete_task, delete_tasks, get_cover_path, get_fanart_path, get_task, google_captcha_browser_active, google_cover_thumbnail, list_task_summaries, purge_tasks, recover_interrupted_tasks, retry_task_images, restore_task_files, save_uploaded_cover, search_google_cover, select_google_cover, update_task_metadata
 from .timeutils import local_now, timezone_name
 from .artwork import image_response
@@ -86,6 +87,7 @@ from . import library as film_library
 from . import library_store
 from .media import catalog_task, catalog_image, update_catalog_metadata, clear_catalog_cache
 from .tasks import edit_task_artwork
+from .streaming import file_stream_response, stop_stream
 from .task_store import overview_groups as load_overview_groups, run_counts, start_artwork_path_repair
 from .task_store import ids as load_task_ids
 from . import updater
@@ -98,6 +100,24 @@ updater.start_scheduler()
 start_cookiecloud_scheduler()
 app = FastAPI(title="JavSP WEB", version=__version__)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+@app.on_event("startup")
+async def _quiet_connection_errors() -> None:
+    """客户端强制断开时 asyncio 会打印 WinError 10054，属于正常现象，静音掉。"""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+
+    def handler(current_loop, context):
+        if isinstance(context.get("exception"), (ConnectionResetError, ConnectionAbortedError, ConnectionError)):
+            return
+        if previous:
+            previous(current_loop, context)
+        else:
+            current_loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
 from .ai_router import router as ai_router
 app.include_router(ai_router)
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -133,6 +153,12 @@ IS_DOCKER = Path("/.dockerenv").exists() or os.environ.get("JAVSP_WEB_DOCKER") =
 
 # 只有来自本机的请求才能操作宿主机的窗口/文件管理器
 _LOCAL_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def _require_local_client(request: Request, action: str) -> None:
+    """文件类破坏性操作（还原/删除宿主文件）只允许本机调用。"""
+    if not _is_local_client(request):
+        raise HTTPException(status_code=403, detail=f"只有运行服务的主机才能{action}")
 
 
 def _is_local_client(request: Request) -> bool:
@@ -1557,7 +1583,9 @@ async def put_task_artwork(task_id: str, kind: Literal['cover', 'fanart'], index
 
 
 @app.delete('/api/tasks/{task_id}/artwork/{kind}/{index}')
-def remove_task_artwork(task_id: str, kind: Literal['cover', 'fanart'], index: int, _: dict = Depends(current_user)):
+def remove_task_artwork(task_id: str, kind: Literal['cover', 'fanart'], index: int, request: Request,
+                        _: dict = Depends(current_user)):
+    _require_local_client(request, "删除图片文件")
     try:
         if index < 0:
             raise ValueError('图片位置无效')
@@ -2480,7 +2508,9 @@ def select_task_cover_with_google(task_id: str, body: dict, _: dict = Depends(cu
 
 
 @app.post("/api/tasks/{task_id}/restore")
-def restore_files(task_id: str, _: dict = Depends(current_user)) -> dict:
+def restore_files(task_id: str, request: Request, _: dict = Depends(current_user)) -> dict:
+    """把整理后的文件还原回原位（会移动/删除宿主文件），仅限本机。"""
+    _require_local_client(request, "还原文件")
     if not restore_task_files(task_id):
         raise HTTPException(status_code=400, detail="无法还原：原文件已存在、整理后文件不存在，或任务没有完整的整理记录")
     return {"ok": True}
@@ -2927,6 +2957,59 @@ def reveal_library_film(film_id: str, request: Request, _: dict = Depends(curren
         raise HTTPException(status_code=404, detail="文件已不存在，无法打开所在目录")
     opened = _reveal_in_file_manager(target)
     return {"ok": True, "path": str(opened)}
+
+
+class PlaybackStopBody(BaseModel):
+    server_id: str = ""
+    play_session_id: str = ""
+
+
+_VIDEO_MEDIA_TYPES = {
+    ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+    ".webm": "video/webm",
+}
+
+
+def _video_media_type(path: Path) -> str:
+    return _VIDEO_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+
+@app.get("/api/library/films/{film_id}/playback")
+def library_film_playback(film_id: str, prefer: Literal['auto', 'emby'] = 'auto',
+                          _: dict = Depends(current_user)) -> dict:
+    """媒体库播放地址：默认本地直连（能播的容器），其余走 Emby/Jellyfin 转码。"""
+    film = _library_film_or_404(film_id, reconcile=False)
+    try:
+        return film_playback(film, prefer)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=connection_error(exc)) from exc
+
+
+@app.post("/api/library/films/{film_id}/playback/stop")
+def library_film_playback_stop(film_id: str, body: "PlaybackStopBody | None" = None,
+                               _: dict = Depends(current_user)) -> dict:
+    """关闭播放器时调用：立刻结束媒体服务器的转码会话，避免磁盘/网络继续被占满。"""
+    _library_film_or_404(film_id, reconcile=False)
+    stopped_local = stop_stream(film_id)
+    result = stop_playback(body.server_id if body else "", body.play_session_id if body else "")
+    result["stopped_local"] = stopped_local
+    return result
+
+
+@app.get("/api/library/films/{film_id}/stream")
+def library_film_stream(film_id: str, request: Request, _: dict = Depends(current_user)):
+    """本地直连播放：只接受索引里的文件路径，由 FileResponse 处理 Range（拖动进度）。"""
+    film = _library_film_or_404(film_id, reconcile=False)
+    if film.get("detached") and not Path(str(film.get("video_path") or "")).is_file():
+        raise HTTPException(status_code=404, detail="文件已不在原位置，请先重新扫描媒体库")
+    target = Path(str(film.get("video_path") or ""))
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="视频文件不存在或不可访问")
+    if target.suffix.lower() not in LOCAL_PLAYABLE_SUFFIXES:
+        raise HTTPException(status_code=415, detail="这个格式浏览器不能直接播放，请改用媒体服务器转码")
+    return file_stream_response(request, target, tag=film_id)
 
 
 @app.get("/api/library/films/{film_id}/cover")

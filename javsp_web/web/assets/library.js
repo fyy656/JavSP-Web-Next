@@ -40,7 +40,7 @@
   const state = {
     libraries: [], activeLibraryId: '', films: [], total: 0, stats: {}, offset: 0,
     status: 'all', query: '', sort: 'updated', groupBy: '', group: null, groupMode: readGroupMode(), groups: [],
-    groupsVisible: GROUP_PAGE, librariesFresh: false,
+    groupsVisible: GROUP_PAGE, librariesFresh: false, playingFilmId: '',
     allCount: 0, allCovers: [],
     loading: false, loaded: false, active: null, nfo: null, pollTimer: null, busy: false,
   };
@@ -68,6 +68,15 @@
     return String(value ?? '').replace(/[&<>"']/g, (character) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     }[character]));
+  }
+
+  function formatDuration(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds) || 0));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const rest = total % 60;
+    const pad = (value) => String(value).padStart(2, '0');
+    return hours ? `${hours}:${pad(minutes)}:${pad(rest)}` : `${minutes}:${pad(rest)}`;
   }
 
   function formatBytes(value) {
@@ -283,7 +292,10 @@
         ? `<button class="button small secondary" type="button" data-lib-scrape="${escape(film.id)}">刮削</button>`
         : `<button class="button small secondary" type="button" data-lib-scrape="${escape(film.id)}">填写番号</button>`;
     return `<article class="lib-card" data-lib-film="${escape(film.id)}">
+      <div class="lib-cover-wrap">
       <button class="lib-cover${cover ? '' : ' lib-cover--empty'}" type="button" data-lib-open="${escape(film.id)}" aria-label="打开 ${escape(film.dvdid || '影片')} 详情">${cover}${placeholder}<span class="lib-badge" data-tone="${status.tone}">${status.label}</span>${parts}</button>
+      <button class="lib-cover-play" type="button" data-lib-play="${escape(film.id)}" aria-label="播放 ${escape(film.dvdid || '影片')}"><span aria-hidden="true">▶</span></button>
+      </div>
       <div class="lib-info">
         <strong class="lib-id">${escape(film.dvdid || '—')}</strong>
         <span class="lib-title" title="${escape(film.title)}">${escape(title)}</span>
@@ -745,6 +757,298 @@
     });
   }
 
+  // ------------------------------------------------------------------ 播放（本地直连优先，Emby 兜底）
+  const PLAYBACK_KEY_PREFIX = 'javsp-web.playback.';
+  const playbackKey = (filmId) => PLAYBACK_KEY_PREFIX + filmId;
+  let player = null;          // ArtPlayer 实例（没有 ArtPlayer 时退回原生 <video>）
+  let playerTimer = 0;
+  let playerPayload = null;
+
+  function readPlaybackPosition(filmId) {
+    try {
+      const value = Number(localStorage.getItem(playbackKey(filmId)));
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  function savePlaybackPosition(filmId, seconds) {
+    try {
+      if (!filmId || !Number.isFinite(seconds) || seconds < 1) return;
+      localStorage.setItem(playbackKey(filmId), String(Math.floor(seconds)));
+    } catch (error) {
+      /* 隐私模式下忽略 */
+    }
+  }
+
+  function clearPlaybackPosition(filmId) {
+    try {
+      localStorage.removeItem(playbackKey(filmId));
+    } catch (error) {
+      /* ignore */
+    }
+  }
+
+  function playbackElements() {
+    return {
+      panel: el('library-player-dialog'),
+      box: el('library-player-box'),
+      video: el('library-player-video'),
+      info: el('library-player-info'),
+    };
+  }
+
+  function playerVideo() {
+    return player?.video || playbackElements().video || null;
+  }
+
+  function setPlayerSource(url) {
+    if (player) {
+      player.url = url;
+      return;
+    }
+    const { video } = playbackElements();
+    if (!video) return;
+    video.src = url;
+  }
+
+  function abortMediaElement(element) {
+    if (!element || typeof element.pause !== 'function') return;
+    try {
+      element.pause();
+      // 必须清空 src 再 load()，浏览器才会真正断开连接，否则服务端会一直读盘
+      element.removeAttribute('src');
+      element.load();
+    } catch (error) {
+      /* ignore */
+    }
+  }
+
+  function notifyPlaybackStopped(payload) {
+    const filmId = state.playingFilmId;
+    if (!filmId) return;
+    const body = JSON.stringify({ server_id: payload.server_id || '', play_session_id: payload.play_session_id || '' });
+    try {
+      // 用 keepalive 保证关闭页面/对话框时也能把请求发出去
+      fetch(`/api/library/films/${encodeURIComponent(filmId)}/playback/stop`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true,
+      }).catch(() => {});
+    } catch (error) {
+      /* ignore */
+    }
+  }
+
+  function destroyPlayer() {
+    const { video, info } = playbackElements();
+    const current = playerVideo();
+    if (state.playingFilmId && current && Number.isFinite(current.currentTime)) {
+      savePlaybackPosition(state.playingFilmId, current.currentTime);
+    }
+    notifyPlaybackStopped(playerPayload);
+    if (player) {
+      const media = player.video;
+      try { player.pause(); } catch (error) { /* ignore */ }
+      abortMediaElement(media);
+      try { if (typeof player.destroy === 'function') player.destroy(false); } catch (error) { /* ignore */ }
+      player = null;
+      const { box } = playbackElements();
+      if (box) box.innerHTML = '';
+    }
+    abortMediaElement(video);
+    if (info) info.textContent = '';
+    const dialog = el('library-player-dialog');
+    if (dialog && dialog.open) {
+      try { dialog.close(); } catch (error) {
+        try { dialog.removeAttribute('open'); } catch (inner) { /* ignore */ }
+      }
+    }
+    state.playingFilmId = '';
+    playerPayload = null;
+    window.clearInterval(playerTimer);
+  }
+
+  function ensureArtPlayer() {
+    const { box, video } = playbackElements();
+    if (!box || typeof window.ArtPlayer !== 'function') return null;
+    if (video) video.hidden = true;
+    box.hidden = false;
+    if (player) return player;
+    try {
+      player = new window.ArtPlayer({
+        container: box,
+        url: '',
+        autoplay: false,
+        airplay: true,
+        theme: '#2f6fed',
+        volume: 0.85,
+        pip: true,
+        fullscreen: true,
+        fullscreenWeb: true,
+        playbackRate: true,
+        aspectRatio: true,
+        setting: true,
+        hotkey: true,
+        miniProgressBar: true,
+        autoPlayback: true,
+        lang: 'zh-cn',
+        moreVideoAttr: { playsInline: true, preload: 'metadata' },
+      });
+      player.on('video:timeupdate', () => {
+        if (!state.playingFilmId || !player) return;
+        savePlaybackPosition(state.playingFilmId, player.currentTime);
+      });
+      player.on('video:ended', () => {
+        if (state.playingFilmId) clearPlaybackPosition(state.playingFilmId);
+      });
+      player.on('video:error', () => {
+        handlePlaybackError('ArtPlayer');
+      });
+      return player;
+    } catch (error) {
+      player = null;
+      // 创建失败时退回原生 <video>，别让用户看到空白播放器
+      if (video) video.hidden = false;
+      if (box) { box.hidden = true; box.innerHTML = ''; }
+      return null;
+    }
+  }
+
+  async function retryWithEmby() {
+    if (!state.playingFilmId) return false;
+    try {
+      const payload = await api(`/api/library/films/${encodeURIComponent(state.playingFilmId)}/playback?prefer=emby`);
+      if (!payload?.url) return false;
+      playerPayload = { ...payload, fallback_mode: '' };
+      setPlayerSource(payload.url);
+      player?.play?.();
+      if (player) {
+        if (payload.transcoding) showToast('已改用媒体服务器转码播放');
+      } else {
+        await playerVideo()?.play?.().catch(() => {});
+      }
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  let playbackRetrying = false;
+
+  async function handlePlaybackError() {
+    const current = playerVideo();
+    const fallback = playerPayload?.fallback_url;
+    if (fallback && !current?.dataset?.fallbackUsed) {
+      if (current?.dataset) current.dataset.fallbackUsed = '1';
+      setPlayerSource(fallback);
+      player?.play?.();
+      showToast('直连放不出来，已改用兜底地址重试', 'danger');
+      return;
+    }
+    if (!playbackRetrying && playerPayload?.fallback_mode === 'emby') {
+      playbackRetrying = true;
+      const ok = await retryWithEmby();
+      playbackRetrying = false;
+      if (ok) return;
+    }
+    const code = current?.error ? current.error.code : '';
+    const reason = { 1: '播放被中止', 2: '网络中断', 3: '解码失败', 4: '格式/地址不可用（浏览器不支持该编码）' }[code] || '未知原因';
+    showToast(`播放失败：${reason}${code ? `（code ${code}）` : ''}`, 'danger');
+  }
+
+  function bindNativePlayer() {
+    const { video } = playbackElements();
+    if (!video || video.dataset.bound === '1') return;
+    video.dataset.bound = '1';
+    video.addEventListener('error', handlePlaybackError);
+  }
+
+  function openPlayer(filmId) {
+    destroyPlayer();
+    const dialog = el('library-player-dialog');
+    if (dialog && !dialog.open) {
+      try { dialog.showModal(); } catch (error) { dialog.setAttribute('open', ''); }
+    }
+    return playFilm(filmId);
+  }
+
+  async function playFilm(filmId) {
+    const { panel, info } = playbackElements();
+    if (!panel) return;
+    try {
+      const payload = await api(`/api/library/films/${encodeURIComponent(filmId)}/playback`);
+      if (!payload?.url) throw new Error('没有拿到可播放的地址');
+      state.playingFilmId = filmId;
+      playerPayload = payload;
+      if (info) {
+        const source = payload.mode === 'local' ? '本地直连' : (payload.transcoding ? '转码播放' : '直连播放');
+        info.textContent = `${source}${payload.server_name ? ' · ' + payload.server_name : ''}`;
+      }
+      const art = ensureArtPlayer();
+      if (!art) bindNativePlayer();
+      const video = playerVideo();
+      if (video?.dataset) video.dataset.fallbackUsed = '';
+      setPlayerSource(payload.url);
+      const resume = readPlaybackPosition(filmId);
+      if (resume > 5) {
+        const applyResume = () => {
+          const current = playerVideo();
+          if (!current) return;
+          const duration = Number(current.duration);
+          if (Number.isFinite(duration) && resume < duration - 10) {
+            current.currentTime = resume;
+            showToast(`已回到上次位置 ${formatDuration(resume)}`);
+          }
+        };
+        if (art) art.once('ready', applyResume);
+        else video?.addEventListener('loadedmetadata', applyResume, { once: true });
+      }
+      if (art) {
+        art.play().catch(() => {});
+      } else {
+        await video?.play?.().catch((error) => {
+          if (error?.name === 'NotAllowedError') {
+            showToast('浏览器阻止了自动播放，请再点一次播放键');
+            return;
+          }
+          showToast(`无法开始播放：${error?.name || 'unknown'}`, 'danger');
+        });
+      }
+      window.clearInterval(playerTimer);
+      playerTimer = window.setInterval(() => {
+        const current = playerVideo();
+        if (state.playingFilmId && current && current.currentTime > 0) {
+          savePlaybackPosition(state.playingFilmId, current.currentTime);
+        }
+      }, 5000);
+    } catch (error) {
+      destroyPlayer();
+      showToast(error.message || '暂时无法播放该影片', 'danger');
+    }
+  }
+
+  function bindPlayerLifecycle() {
+    const playerDialog = el('library-player-dialog');
+    if (playerDialog && typeof playerDialog.addEventListener === 'function' && playerDialog.dataset.playerBound !== '1') {
+      playerDialog.dataset.playerBound = '1';
+      playerDialog.addEventListener('close', () => destroyPlayer());
+      playerDialog.addEventListener('cancel', () => destroyPlayer());
+      // 点窗口外的遮罩关闭
+      playerDialog.addEventListener('click', (event) => {
+        if (event.target === playerDialog) destroyPlayer();
+      });
+      // 关页面/刷新时也通知服务端收尾
+      window.addEventListener('pagehide', () => {
+        if (state.playingFilmId) notifyPlaybackStopped(playerPayload);
+      });
+    }
+    const dialog = el('library-film-dialog');
+    if (!dialog || typeof dialog.addEventListener !== 'function' || dialog.dataset.playerBound === '1') return;
+    dialog.dataset.playerBound = '1';
+    dialog.addEventListener('close', () => destroyPlayer());
+    dialog.addEventListener('cancel', () => destroyPlayer());
+  }
+
   // ------------------------------------------------------------------ 影片详情
   function detailMarkup(film) {
     const status = toneFor(film);
@@ -762,6 +1066,7 @@
           ${film.detached ? '<p class="muted">已整理到整理目录（索引已跟随，不需要重新扫描）</p>' : ''}
           <p class="muted">文件：${escape(film.video_path || '')}</p>
           ${canReveal() ? `<button class="button secondary small" type="button" data-lib-reveal="${escape(film.id)}">打开文件所在目录</button>` : ''}
+          <button class="button primary small" type="button" data-lib-play="${escape(film.id)}" title="通过已连接的 Emby / Jellyfin 播放">播放</button>
           <p class="muted">${formatBytes(film.size_bytes)} · ${(film.files || []).length} 个文件${film.fanart_count ? ` · ${film.fanart_count} 张剧照` : ''}</p>
           ${film.last_error ? `<p class="form-error">${escape(film.last_error)}</p>` : ''}
           ${film.last_task_id ? `<p class="muted">最近任务：<code>${escape(film.last_task_id)}</code></p>` : ''}
@@ -789,6 +1094,7 @@
   }
 
   async function openFilm(filmId) {
+    destroyPlayer();
     try {
       const [{ film }, nfo] = await Promise.all([
         api(`/api/library/films/${encodeURIComponent(filmId)}`),
@@ -953,6 +1259,17 @@
       batchScrape();
       return;
     }
+    if (event.target.closest('[data-lib-play]')) {
+      event.preventDefault();
+      event.stopPropagation();
+      openPlayer(event.target.closest('[data-lib-play]').dataset.libPlay);
+      return;
+    }
+    if (event.target.closest('#library-player-close')) {
+      event.preventDefault();
+      destroyPlayer();
+      return;
+    }
     if (event.target.closest('#library-scan')) {
       scan();
       return;
@@ -1048,6 +1365,8 @@
     if (event.target.closest('#library-film-save')) { saveFilm({ scrape: false }); return; }
     if (event.target.closest('#library-film-scrape')) { saveFilm({ scrape: true }); return; }
   });
+
+  bindPlayerLifecycle();
 
   document.addEventListener('change', (event) => {
     if (event.target.id === 'library-sort') {

@@ -7,8 +7,9 @@ import struct
 import re
 import hashlib
 import threading
+from pathlib import Path
 from urllib.parse import quote
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -54,6 +55,275 @@ def _headers(server: dict) -> dict[str, str]:
 
 def _params(server: dict, **params: object) -> dict[str, object]:
     return dict(params)
+
+
+_PLAYBACK_USER_CACHE: dict[str, str] = {}
+_PLAYBACK_LOCK = threading.Lock()
+
+# 让 Emby 把不兼容的容器/编码转成「渐进式 MP4（H.264 + AAC）」，
+# 这样浏览器用原生 <video> 就能播，不需要额外引入 HLS 播放库。
+_PLAYBACK_DEVICE_PROFILE = {
+    "Name": "JavSP Web",
+    "MaxStreamingBitrate": 40_000_000,
+    "MaxStaticBitrate": 40_000_000,
+    "MusicStreamingTranscodingBitrate": 192_000,
+    "DirectPlayProfiles": [],
+    "TranscodingProfiles": [
+        {"Container": "mp4", "Type": "Video", "VideoCodec": "h264", "AudioCodec": "aac",
+         "Protocol": "Http", "Context": "Streaming", "MaxAudioChannels": "2", "CopyTimestamps": False},
+    ],
+    "CodecProfiles": [],
+    "ContainerProfiles": [],
+    "ResponseProfiles": [],
+}
+
+
+def _playback_user_id(server: dict) -> str:
+    """取一个可用的 Emby/Jellyfin 用户 id（用于 PlaybackInfo），按服务器缓存。"""
+    cache_key = f"{server.get('id')}:{server.get('url')}"
+    with _PLAYBACK_LOCK:
+        cached = _PLAYBACK_USER_CACHE.get(cache_key)
+    if cached:
+        return cached
+    user_id = ""
+    try:
+        me = requests.get(f"{_service_url(server)}/Users/Me", headers=_playback_headers(server), timeout=15)
+        if me.status_code == 200:
+            payload = me.json()
+            if isinstance(payload, dict):
+                user_id = str(payload.get("Id") or "")
+    except (requests.RequestException, ValueError):
+        user_id = ""
+    if not user_id:
+        try:
+            response = requests.get(f"{_service_url(server)}/Users", headers=_playback_headers(server), timeout=15)
+            response.raise_for_status()
+            users = response.json() or []
+        except (requests.RequestException, ValueError):
+            users = []
+        for user in users:
+            user_id = str(user.get("Id") or "")
+            if user.get("Policy", {}).get("IsAdministrator"):
+                break
+    if user_id:
+        with _PLAYBACK_LOCK:
+            _PLAYBACK_USER_CACHE[cache_key] = user_id
+    return user_id
+
+
+def _with_api_key(url: str, key: str) -> str:
+    """把 api_key 拼进查询串；URL 里已经有 api_key 时不再重复添加（重复会让 Emby 返回 401）。"""
+    if not url or not key:
+        return url
+    parsed = urlsplit(url)
+    query = parsed.query
+    if any(name == "api_key" for name, _ in parse_qsl(query, keep_blank_values=True)):
+        return url
+    extra = urlencode({"api_key": key})
+    query = f"{query}&{extra}" if query else extra
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment))
+
+
+def _playback_headers(server: dict) -> dict:
+    headers = _headers(server)
+    headers.update({
+        "X-Emby-Client": "JavSP Web",
+        "X-Emby-Client-Version": "1.0",
+        "X-Emby-Device-Id": "javsp-web-player",
+        "X-Emby-Device-Name": "JavSP Web",
+    })
+    return headers
+
+
+# 浏览器（Chrome/Edge/Safari/手机）能直接解码的容器；其余交给 Emby 转码
+LOCAL_PLAYABLE_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm"}
+
+
+def local_playable(film: dict) -> bool:
+    """这个文件能否由浏览器直接播放（容器层面判断，不看编码）。"""
+    path = Path(str(film.get("video_path") or ""))
+    return path.suffix.lower() in LOCAL_PLAYABLE_SUFFIXES and path.is_file()
+
+
+def _search_movies(server: dict, term: str, parent_id: str = "") -> list[dict]:
+    params = {"Recursive": "true", "IncludeItemTypes": "Movie", "SearchTerm": term,
+              "Fields": "Path,MediaSources", "Limit": 50}
+    if parent_id:
+        params["ParentId"] = parent_id
+    response = requests.get(f"{_service_url(server)}/Items", headers=_playback_headers(server),
+                            params=params, timeout=25)
+    response.raise_for_status()
+    return (response.json() or {}).get("Items", []) or []
+
+
+def _server_libraries(server: dict) -> list[str]:
+    try:
+        response = requests.get(f"{_service_url(server)}/Library/MediaFolders", headers=_playback_headers(server),
+                                timeout=20)
+        response.raise_for_status()
+        return [str(item.get("Id")) for item in (response.json() or {}).get("Items", []) if item.get("Id")]
+    except (requests.RequestException, ValueError):
+        return []
+
+
+def resolve_playback_item(film: dict) -> tuple[dict, dict] | None:
+    """在媒体服务器的所有库里找这部影片（不依赖路径映射，也不限“已勾选的媒体库”）。
+
+    匹配顺序（越靠前越可信）：
+    1. 绝对路径完全一致 —— 服务端与媒体服务器看到同一个路径时（同一台机器/NAS）
+    2. 文件名一致 —— 盘符或挂载点不同，但文件本身是同一个
+    3. 番号唯一命中 —— 文件名被改过时兜底，出现多个候选就放弃，避免串片
+    """
+    video = Path(str(film.get("video_path") or ""))
+    dvdid = str(film.get("dvdid") or "").strip().upper()
+    term = dvdid or video.stem
+    if not term:
+        return None
+
+    normalize = lambda value: str(value).replace("\\", "/").rstrip("/").casefold()
+    wanted_path = normalize(str(video))
+    wanted_name = video.name.casefold()
+    wanted_stem = video.stem.casefold()
+
+    def direct(item: dict) -> bool:
+        path = normalize(str(item.get("Path") or ""))
+        return bool(path) and (path == wanted_path or path.rsplit("/", 1)[0] == wanted_path.rsplit("/", 1)[0])
+
+    def same_file(item: dict) -> bool:
+        name = str(Path(str(item.get("Path") or "")).name).casefold()
+        if not name:
+            return False
+        return name == wanted_name or Path(name).stem == wanted_stem
+
+    candidates: list[tuple[dict, dict]] = []
+    for server in list_media_servers():
+        try:
+            items = _search_movies(server, term)
+        except (requests.RequestException, ValueError):
+            continue
+        for item in items:
+            if not item.get("Id"):
+                continue
+            candidates.append((server, item))
+
+    if not candidates:
+        return None
+
+    exact = [entry for entry in candidates if direct(entry[1])]
+    if len(exact) == 1:
+        return exact[0]
+    by_name = [entry for entry in candidates if same_file(entry[1])]
+    if len(by_name) == 1:
+        return by_name[0]
+    if len(by_name) > 1:
+        # 同名多个（例如分 P），用番号所在目录再筛一次仍不唯一就放弃
+        narrowed = [entry for entry in by_name if dvdid and dvdid.casefold() in normalize(str(entry[1].get("Path") or ""))]
+        if len(narrowed) == 1:
+            return narrowed[0]
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def film_playback(film: dict, prefer: str = "auto") -> dict:
+    """把媒体库影片映射到 Emby/Jellyfin 条目，返回浏览器可直接播放的 URL。
+
+    B3 方案：URL 里带上服务器的 api_key（不做反向代理），由 Emby 决定直连还是转码。
+    """
+    film_id = str(film.get("id") or "")
+    if prefer != "emby" and local_playable(film):
+        return {
+            "mode": "local",
+            "server_id": "",
+            "server_name": "",
+            "item_id": "",
+            "url": f"/api/library/films/{quote(film_id)}/stream",
+            "fallback_url": "",
+            "fallback_mode": "emby",
+            "container": Path(str(film.get("video_path") or "")).suffix.lower().lstrip("."),
+            "transcoding": False,
+            "play_session_id": "",
+        }
+    resolved = resolve_playback_item(film)
+    if resolved is None:
+        raise ValueError("没有在已连接的 Emby / Jellyfin 里找到这部影片（检查服务器地址、API Key，或在路径映射里配置两边的路径对应关系）")
+    server, item = resolved
+    item_id = str(item.get("Id") or "")
+    source_id = str(item.get("MediaSources") and (item["MediaSources"][0].get("Id") or "") or "") or item_id
+    base = _service_url(server)
+    key = str(server.get("api_key") or "").strip()
+    user_id = _playback_user_id(server)
+    params = {"UserId": user_id} if user_id else {}
+    response = requests.post(f"{base}/Items/{item_id}/PlaybackInfo", headers=_playback_headers(server), params=params,
+                             json={"DeviceProfile": _PLAYBACK_DEVICE_PROFILE,
+                                   "MaxStreamingBitrate": _PLAYBACK_DEVICE_PROFILE["MaxStreamingBitrate"],
+                                   # 强制转码：直连/直封装在浏览器里经常"能加载但放不出来"
+                                   "EnableDirectPlay": False,
+                                   "EnableDirectStream": False,
+                                   "AllowVideoStreamCopy": True,
+                                   "AllowAudioStreamCopy": True},
+                             timeout=30)
+    response.raise_for_status()
+    data = response.json() or {}
+    media_source = (data.get("MediaSources") or [{}])[0]
+    source_id = str(media_source.get("Id") or source_id or item_id)
+
+    def absolute(value: str) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        raw = _with_api_key(raw, key)
+        return base + raw if raw.startswith("/") else raw
+
+    transcode_url = absolute(str(media_source.get("TranscodingUrl") or ""))
+    direct_url = absolute(str(media_source.get("DirectStreamUrl") or ""))
+    if not direct_url:
+        # 强制转码时 Emby 不会给直连地址，这里自己拼一个静态流作为兜底
+        direct_url = absolute(f"/videos/{item_id}/original.mp4?MediaSourceId={quote(source_id)}&DeviceId=javsp-web-player")
+    url = transcode_url or direct_url
+    if not url:
+        raise ValueError("媒体服务器没有返回可播放的地址（请在 Emby 里确认该影片可以播放/允许转码）")
+    local_url = f"/api/library/films/{quote(film_id)}/stream" if local_playable(film) else ""
+    return {
+        "mode": "emby",
+        "server_id": str(server.get("id") or ""),
+        "server_name": str(server.get("name") or ""),
+        "item_id": item_id,
+        "url": url,
+        "fallback_url": local_url or (direct_url if direct_url != url else ""),
+        "container": str((media_source.get("Container") or "")).lower(),
+        "transcoding": bool(transcode_url),
+        "play_session_id": str(data.get("PlaySessionId") or ""),
+    }
+
+
+def stop_playback(server_id: str = "", play_session_id: str = "") -> dict:
+    """结束一次播放：让 Emby/Jellyfin 立刻停掉转码任务，否则它会一直读到超时。
+
+    - DELETE /Videos/ActiveEncodings 立即停止当前转码（磁盘/CPU 马上降下来）
+    - POST /Sessions/Playing/Stopped 正常上报结束，顺带写入播放进度
+    """
+    targets = [server for server in list_media_servers() if not server_id or str(server.get("id")) == server_id]
+    results = []
+    for server in targets:
+        base = _service_url(server)
+        headers = _playback_headers(server)
+        params = {"DeviceId": "javsp-web-player"}
+        if play_session_id:
+            params["PlaySessionId"] = play_session_id
+        try:
+            response = requests.delete(f"{base}/Videos/ActiveEncodings", headers=headers, params=params, timeout=15)
+            results.append({"server_id": server.get("id"), "stopped": response.status_code < 400})
+        except requests.RequestException as exc:
+            results.append({"server_id": server.get("id"), "stopped": False, "error": str(exc)[:120]})
+        if play_session_id:
+            try:
+                requests.post(f"{base}/Sessions/Playing/Stopped", headers=headers,
+                              json={"PlaySessionId": play_session_id, "PositionTicks": 0}, timeout=10)
+            except requests.RequestException:
+                pass
+    return {"ok": True, "results": results}
 
 
 def connection_error(exc: Exception) -> str:

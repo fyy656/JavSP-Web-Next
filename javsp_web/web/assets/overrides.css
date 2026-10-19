@@ -900,3 +900,27 @@ html[data-privacy-mode="1"] .overview-cover:hover .library-artwork img,html[data
 }
 html[data-privacy-mode="1"] .lib-cover img,
 html[data-privacy-mode="1"] .lib-detail-cover img { filter: blur(14px); transform: scale(1.06); }
+
+/* 媒体库内置播放器（Emby 直连/转码，渐进式 MP4） */
+.lib-player[hidden] { display: none; }
+/* 播放器：独立大窗，按 1920×1080 上限自适应 */
+.lib-player-dialog { width: min(1920px, 96vw); max-width: 1920px; padding: 0; border: 0; background: #000; border-radius: 12px; overflow: hidden; }
+.lib-player-dialog::backdrop { background: #000000c4; backdrop-filter: blur(2px); }
+.lib-player-scope { display: grid; gap: 0; }
+.lib-player-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; background: #101014; color: #e9e9ee; font-size: 12px; }
+.lib-player-topbar .muted { color: #a9a9b8; }
+.lib-player-box { width: 100%; aspect-ratio: 16 / 9; max-height: 88vh; background: #000; }
+.lib-player-box[hidden] { display: none; }
+.lib-player-video { width: 100%; aspect-ratio: 16 / 9; max-height: 88vh; background: #000; }
+.lib-player-video[hidden] { display: none; }
+
+/* 卡片悬停播放按钮 */
+.lib-cover-wrap { position: relative; }
+.lib-cover-play { position: absolute; inset: 0; display: grid; place-items: center; width: 100%; border: 0; border-radius: inherit; background: #00000038; opacity: 0; cursor: pointer; transition: opacity .16s ease; pointer-events: none; }
+.lib-cover-play span { pointer-events: auto; }
+.lib-cover-wrap:hover .lib-cover-play, .lib-cover-play:focus-visible { opacity: 1; }
+.lib-cover-play span { display: grid; place-items: center; width: 56px; height: 56px; border-radius: 50%; background: #000000b3; color: #fff; font-size: 22px; line-height: 1; box-shadow: 0 6px 18px #00000059; transition: transform .16s ease, background .16s ease; }
+.lib-cover-wrap:hover .lib-cover-play span { background: #ffffff26; border: 1px solid #ffffff59; }
+.lib-cover-play:hover span { transform: scale(1.08); background: #ffffff33; }
+@media (hover: none) { .lib-cover-play { opacity: 1; background: transparent; } .lib-cover-play span { width: 44px; height: 44px; font-size: 18px; } }
+.lib-player-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; }

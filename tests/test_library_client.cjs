@@ -662,6 +662,40 @@ async function main() {
       '预设里的“选择路径”按钮也要按本机判断');
   }
 
+  // 23) 会动宿主机文件的操作只对主机上的页面开放
+  {
+    const app = fs.readFileSync(path.join(__dirname, '../javsp_web/web/assets/app.js'), 'utf8');
+    assert.match(app, /function hostFileActionsAllowed\(\)/, '需要本机判断助手');
+    assert.match(app, /task\.restore_available && hostFileActionsAllowed\(\)/,
+      '还原文件按钮要按本机判断');
+  }
+
+  // 24) 媒体库播放：详情里有播放入口，进度存本地
+  {
+    const librarySource = fs.readFileSync(path.join(__dirname, '../javsp_web/web/assets/library.js'), 'utf8');
+    assert.match(librarySource, /data-lib-play="\$\{escape\(film\.id\)\}"/, '详情里要有播放按钮');
+    assert.match(librarySource, /javsp-web\.playback\./, '播放进度要存在 localStorage');
+    assert.match(librarySource, /\/api\/library\/films\/\$\{encodeURIComponent\(filmId\)\}\/playback/,
+      '播放要走 playback 接口');
+    const page = fs.readFileSync(path.join(__dirname, '../javsp_web/web/index.html'), 'utf8');
+    assert.match(page, /id="library-player-video"/, '播放器元素要存在');
+    assert.match(page, /id="library-player-box"/, 'ArtPlayer 容器要存在');
+    assert.match(page, /\/assets\/artplayer\.min\.js/, '要加载 ArtPlayer');
+    assert.match(librarySource, /new window\.ArtPlayer\(/, '有 ArtPlayer 时用它渲染');
+    assert.match(page, /id="library-player-dialog"/, '播放器是独立大窗');
+    assert.match(librarySource, /class="lib-cover-play"/, '卡片封面要有悬停播放按钮');
+    assert.match(librarySource, /function openPlayer\(/, '播放走 openPlayer');
+    const css = fs.readFileSync(path.join(__dirname, '../javsp_web/web/assets/overrides.css'), 'utf8');
+    assert.match(css, /\.lib-cover-wrap:hover \.lib-cover-play/, '悬停才显示播放按钮');
+    assert.match(css, /width: min\(1920px, 96vw\)/, '播放窗口按 1920 上限自适应');
+    assert.match(librarySource, /function abortMediaElement\(/, '关闭时要真正断开媒体连接');
+    assert.match(librarySource, /playback\/stop/, '关闭时要通知服务端结束播放');
+    assert.match(librarySource, /keepalive: true/, '关闭页面时也要发出停止请求');
+    assert.doesNotMatch(librarySource, /payload\.mode !== 'emby'\) return;/, '本地播放关闭时也要停流');
+    assert.match(librarySource, /fallback_mode === 'emby'/, '本地播不了要回退到 Emby');
+    assert.ok(fs.existsSync(path.join(__dirname, '../javsp_web/web/assets/artplayer.min.js')), 'ArtPlayer 文件要随仓库分发');
+  }
+
   console.log('library client tests passed');
 }
 

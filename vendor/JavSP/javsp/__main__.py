@@ -57,7 +57,7 @@ from javsp.web.base import download, read_proxy
 from javsp.web.exceptions import *
 from javsp.web.translate import translate_movie_info
 
-from javsp.config import Cfg, CrawlerID
+from javsp.config import Cfg, CrawlerID, UseJavDBCover
 from javsp.prompt import prompt
 
 actressAliasMap = {}
