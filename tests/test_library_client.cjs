@@ -692,6 +692,19 @@ async function main() {
     assert.match(librarySource, /playback\/stop/, '关闭时要通知服务端结束播放');
     assert.match(librarySource, /keepalive: true/, '关闭页面时也要发出停止请求');
     assert.doesNotMatch(librarySource, /payload\.mode !== 'emby'\) return;/, '本地播放关闭时也要停流');
+    assert.match(librarySource, /function watchPlaybackStall\(/, '要有卡住检测');
+    assert.match(librarySource, /readyState >= 2/, '卡住判断看是否拿到元数据');
+    assert.match(librarySource, /已改用转码播放/, '卡住后要自动改走转码');
+    assert.match(page, /\/assets\/hls\.min\.js/, '转码用 HLS 播放，需要 hls.js');
+    assert.match(page, /id="library-player-mode"/, '播放器里要有直连/转码切换按钮');
+    assert.match(librarySource, /customType: \{/, 'ArtPlayer 要注册 m3u8 自定义类型');
+    assert.match(librarySource, /function switchPlaybackMode\(/, '要有模式切换逻辑');
+    assert.match(librarySource, /prefer: prefer|query\.set\('prefer'/, '切换模式要带 prefer 参数');
+    assert.match(librarySource, /query\.set\('start'/, '切换模式要保持播放位置');
+    assert.match(librarySource, /destroyPlayer\(\{ keepDialog: true \}\)/, '切换模式时不要关播放窗口');
+    assert.match(librarySource, /state\.playerSwitching = true/, '切换期间要屏蔽 close 事件');
+    assert.match(librarySource, /function abortAllMedia\(/, '关闭时要清理所有残留媒体元素');
+    assert.ok(fs.existsSync(path.join(__dirname, '../javsp_web/web/assets/hls.min.js')), 'hls.js 要随仓库分发');
     assert.match(librarySource, /fallback_mode === 'emby'/, '本地播不了要回退到 Emby');
     assert.ok(fs.existsSync(path.join(__dirname, '../javsp_web/web/assets/artplayer.min.js')), 'ArtPlayer 文件要随仓库分发');
   }

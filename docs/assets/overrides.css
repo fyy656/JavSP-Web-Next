@@ -909,6 +909,8 @@ html[data-privacy-mode="1"] .lib-detail-cover img { filter: blur(14px); transfor
 .lib-player-scope { display: grid; gap: 0; }
 .lib-player-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; background: #101014; color: #e9e9ee; font-size: 12px; }
 .lib-player-topbar .muted { color: #a9a9b8; }
+.lib-player-actions { display: flex; align-items: center; gap: 8px; }
+#library-player-mode { min-width: 76px; }
 .lib-player-box { width: 100%; aspect-ratio: 16 / 9; max-height: 88vh; background: #000; }
 .lib-player-box[hidden] { display: none; }
 .lib-player-video { width: 100%; aspect-ratio: 16 / 9; max-height: 88vh; background: #000; }

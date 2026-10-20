@@ -681,12 +681,12 @@ class LibraryApiTests(unittest.TestCase):
 
     def test_local_stream_rejects_unsupported_containers(self):
         """浏览器放不了的容器不让直连，交给 Emby 转码。"""
-        folder = self.media / 'MKV-001'
+        folder = self.media / 'ISO-001'
         folder.mkdir()
-        (folder / 'MKV-001.mkv').write_bytes(VIDEO_BYTES)
-        write_nfo(folder / 'MKV-001.nfo', 'MKV-001', 'Matroska')
+        (folder / 'ISO-001.iso').write_bytes(VIDEO_BYTES)
+        write_nfo(folder / 'ISO-001.nfo', 'ISO-001', 'Disc image')
         library = self.create_library()
-        film = self.film_by_dvdid('MKV-001')
+        film = self.film_by_dvdid('ISO-001')
         response = self.client.get(f'/api/library/films/{film["id"]}/stream')
         self.assertEqual(response.status_code, 415, response.text)
 

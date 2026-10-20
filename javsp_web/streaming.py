@@ -50,10 +50,12 @@ def stop_stream(key: str) -> bool:
     logger.info("已叫停本地直连播放: %s", key)
     return True
 _MEDIA_TYPES = {
-    ".mp4": "video/mp4",
-    ".m4v": "video/mp4",
-    ".mov": "video/quicktime",
-    ".webm": "video/webm",
+    ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+    ".mkv": "video/x-matroska", ".avi": "video/x-msvideo", ".wmv": "video/x-ms-wmv",
+    ".asf": "video/x-ms-asf", ".mpg": "video/mpeg", ".mpeg": "video/mpeg",
+    ".m2ts": "video/mp2t", ".mts": "video/mp2t", ".ts": "video/mp2t",
+    ".flv": "video/x-flv", ".rmvb": "application/vnd.rn-realmedia-vbr", ".rm": "application/vnd.rn-realmedia",
+    ".3gp": "video/3gpp", ".ogv": "video/ogg", ".divx": "video/x-msvideo", ".vob": "video/mpeg",
 }
 
 

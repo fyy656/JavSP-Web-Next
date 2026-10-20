@@ -69,6 +69,9 @@ _PLAYBACK_DEVICE_PROFILE = {
     "MusicStreamingTranscodingBitrate": 192_000,
     "DirectPlayProfiles": [],
     "TranscodingProfiles": [
+        # HLS 分片：浏览器可以随意拖动进度条；放不出来时下面的渐进式 MP4 兜底
+        {"Container": "ts", "Type": "Video", "VideoCodec": "h264", "AudioCodec": "aac",
+         "Protocol": "Hls", "Context": "Streaming", "MaxAudioChannels": "2", "CopyTimestamps": False},
         {"Container": "mp4", "Type": "Video", "VideoCodec": "h264", "AudioCodec": "aac",
          "Protocol": "Http", "Context": "Streaming", "MaxAudioChannels": "2", "CopyTimestamps": False},
     ],
@@ -136,7 +139,12 @@ def _playback_headers(server: dict) -> dict:
 
 
 # 浏览器（Chrome/Edge/Safari/手机）能直接解码的容器；其余交给 Emby 转码
-LOCAL_PLAYABLE_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm"}
+# 默认所有视频容器都先走本地直连；浏览器解不了时再退回媒体服务器转码
+LOCAL_PLAYABLE_SUFFIXES = {
+    ".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".wmv", ".asf",
+    ".mpg", ".mpeg", ".m2ts", ".mts", ".ts", ".flv", ".rmvb", ".rm",
+    ".3gp", ".ogv", ".divx", ".vob",
+}
 
 
 def local_playable(film: dict) -> bool:
@@ -145,18 +153,31 @@ def local_playable(film: dict) -> bool:
     return path.suffix.lower() in LOCAL_PLAYABLE_SUFFIXES and path.is_file()
 
 
-def _search_movies(server: dict, term: str, parent_id: str = "") -> list[dict]:
-    params = {"Recursive": "true", "IncludeItemTypes": "Movie", "SearchTerm": term,
-              "Fields": "Path,MediaSources", "Limit": 50}
-    if parent_id:
-        params["ParentId"] = parent_id
-    response = requests.get(f"{_service_url(server)}/Items", headers=_playback_headers(server),
-                            params=params, timeout=25)
-    response.raise_for_status()
-    return (response.json() or {}).get("Items", []) or []
+_RESOLVED_TTL = 3600
+_RESOLVED_CACHE: dict[tuple[str, str], tuple[float, dict, dict]] = {}
+_PATH_INDEX_TTL = 600
+_PATH_INDEX_CACHE: dict[str, tuple[float, dict[str, dict]]] = {}
+_PLAYBACK_LOCK = threading.Lock()
+
+
+def _normalize_path(value) -> str:
+    return str(value or "").replace("\\", "/").rstrip("/").casefold()
+
+
+def _items_by_path(server: dict, path: str) -> list[dict]:
+    """按绝对路径精确查条目；Emby 的标题常常不含番号，按名称搜索会漏。"""
+    try:
+        response = requests.get(f"{_service_url(server)}/Items", headers=_playback_headers(server),
+                                params={"Path": path, "Recursive": "true",
+                                        "Fields": "Path,MediaSources", "Limit": 10}, timeout=25)
+        response.raise_for_status()
+        return [item for item in (response.json() or {}).get("Items", []) if item.get("Id")]
+    except (requests.RequestException, ValueError):
+        return []
 
 
 def _server_libraries(server: dict) -> list[str]:
+    """媒体服务器上所有库的 id（用于遍历条目建立路径索引）。"""
     try:
         response = requests.get(f"{_service_url(server)}/Library/MediaFolders", headers=_playback_headers(server),
                                 timeout=20)
@@ -166,73 +187,99 @@ def _server_libraries(server: dict) -> list[str]:
         return []
 
 
-def resolve_playback_item(film: dict) -> tuple[dict, dict] | None:
-    """在媒体服务器的所有库里找这部影片（不依赖路径映射，也不限“已勾选的媒体库”）。
+def _library_path_index(server: dict, force: bool = False) -> dict[str, dict]:
+    """拉一份「文件路径 → 条目」的索引（按服务器缓存 10 分钟），用于路径/文件名匹配。"""
+    key = str(server.get("id") or server.get("url") or "")
+    with _PLAYBACK_LOCK:
+        cached = _PATH_INDEX_CACHE.get(key)
+    if cached and not force and time.monotonic() - cached[0] < _PATH_INDEX_TTL:
+        return cached[1]
+    index: dict[str, dict] = {}
+    for library_id in _server_libraries(server):
+        start = 0
+        while True:
+            params = {"ParentId": library_id, "Recursive": "true", "IncludeItemTypes": "Movie,Video",
+                      "Fields": "Path", "Limit": 200, "StartIndex": start,
+                      "EnableTotalRecordCount": "false"}
+            try:
+                response = requests.get(f"{_service_url(server)}/Items", headers=_playback_headers(server),
+                                        params=params, timeout=30)
+                response.raise_for_status()
+                items = (response.json() or {}).get("Items", [])
+            except (requests.RequestException, ValueError):
+                break
+            if not items:
+                break
+            for item in items:
+                item_path = _normalize_path(item.get("Path"))
+                if item_path and item.get("Id"):
+                    index.setdefault(item_path, item)
+            if len(items) < 200:
+                break
+            start += 200
+    with _PLAYBACK_LOCK:
+        _PATH_INDEX_CACHE[key] = (time.monotonic(), index)
+    return index
 
-    匹配顺序（越靠前越可信）：
-    1. 绝对路径完全一致 —— 服务端与媒体服务器看到同一个路径时（同一台机器/NAS）
-    2. 文件名一致 —— 盘符或挂载点不同，但文件本身是同一个
-    3. 番号唯一命中 —— 文件名被改过时兜底，出现多个候选就放弃，避免串片
-    """
-    video = Path(str(film.get("video_path") or ""))
-    dvdid = str(film.get("dvdid") or "").strip().upper()
-    term = dvdid or video.stem
-    if not term:
-        return None
 
-    normalize = lambda value: str(value).replace("\\", "/").rstrip("/").casefold()
-    wanted_path = normalize(str(video))
-    wanted_name = video.name.casefold()
-    wanted_stem = video.stem.casefold()
-
-    def direct(item: dict) -> bool:
-        path = normalize(str(item.get("Path") or ""))
-        return bool(path) and (path == wanted_path or path.rsplit("/", 1)[0] == wanted_path.rsplit("/", 1)[0])
-
-    def same_file(item: dict) -> bool:
-        name = str(Path(str(item.get("Path") or "")).name).casefold()
-        if not name:
-            return False
-        return name == wanted_name or Path(name).stem == wanted_stem
-
-    candidates: list[tuple[dict, dict]] = []
-    for server in list_media_servers():
-        try:
-            items = _search_movies(server, term)
-        except (requests.RequestException, ValueError):
-            continue
-        for item in items:
-            if not item.get("Id"):
-                continue
-            candidates.append((server, item))
-
-    if not candidates:
-        return None
-
-    exact = [entry for entry in candidates if direct(entry[1])]
-    if len(exact) == 1:
-        return exact[0]
-    by_name = [entry for entry in candidates if same_file(entry[1])]
-    if len(by_name) == 1:
-        return by_name[0]
-    if len(by_name) > 1:
-        # 同名多个（例如分 P），用番号所在目录再筛一次仍不唯一就放弃
-        narrowed = [entry for entry in by_name if dvdid and dvdid.casefold() in normalize(str(entry[1].get("Path") or ""))]
-        if len(narrowed) == 1:
-            return narrowed[0]
-        return None
-    if len(candidates) == 1:
-        return candidates[0]
+def _lookup_by_file(index: dict[str, dict], video: Path) -> dict | None:
+    wanted = _normalize_path(video)
+    if wanted in index:
+        return index[wanted]
+    name = video.name.casefold()
+    matches = [item for path, item in index.items() if path.rsplit("/", 1)[-1] == name]
+    if len(matches) == 1:
+        return matches[0]
     return None
 
 
-def film_playback(film: dict, prefer: str = "auto") -> dict:
+def resolve_playback_item(film: dict) -> tuple[dict, dict] | None:
+    """在媒体服务器的所有库里找这部影片，只以**文件路径和文件名**为准。
+
+    1. 绝对路径精确查询（服务端与媒体服务器看到同一路径时最快）
+    2. 库索引里按路径 / 文件名匹配（盘符或挂载点不同也能命中）
+    标题与番号不参与匹配：Emby 里的标题经常不含番号，按名称搜索会漏片。
+    """
+    video = Path(str(film.get("video_path") or ""))
+    if not video.name:
+        return None
+    film_id = str(film.get("id") or "")
+    for server in list_media_servers():
+        cache_key = (str(server.get("id") or ""), film_id)
+        cached = _RESOLVED_CACHE.get(cache_key)
+        if cached and time.monotonic() - cached[0] < _RESOLVED_TTL:
+            return cached[1], cached[2]
+        resolved = _resolve_on_server(server, video)
+        if resolved is not None:
+            if film_id:
+                _RESOLVED_CACHE[cache_key] = (time.monotonic(), server, resolved)
+            return server, resolved
+    return None
+
+
+def _resolve_on_server(server: dict, video: Path) -> dict | None:
+    found = _items_by_path(server, str(video))
+    if len(found) == 1:
+        return found[0]
+    if len(found) > 1:
+        exact = [item for item in found if _normalize_path(item.get("Path")) == _normalize_path(video)]
+        if len(exact) == 1:
+            return exact[0]
+        return None
+    item = _lookup_by_file(_library_path_index(server), video)
+    if item is not None:
+        return item
+    # 索引可能过期：强制刷新一次再试
+    return _lookup_by_file(_library_path_index(server, force=True), video)
+
+
+def film_playback(film: dict, prefer: str = "auto", start_seconds: int = 0) -> dict:
     """把媒体库影片映射到 Emby/Jellyfin 条目，返回浏览器可直接播放的 URL。
 
     B3 方案：URL 里带上服务器的 api_key（不做反向代理），由 Emby 决定直连还是转码。
     """
     film_id = str(film.get("id") or "")
-    if prefer != "emby" and local_playable(film):
+    if prefer in ("auto", "local") and local_playable(film):
         return {
             "mode": "local",
             "server_id": "",
@@ -240,14 +287,15 @@ def film_playback(film: dict, prefer: str = "auto") -> dict:
             "item_id": "",
             "url": f"/api/library/films/{quote(film_id)}/stream",
             "fallback_url": "",
-            "fallback_mode": "emby",
+            "fallback_mode": "emby" if prefer == "auto" else "",
+            "start_seconds": max(0, int(start_seconds or 0)),
             "container": Path(str(film.get("video_path") or "")).suffix.lower().lstrip("."),
             "transcoding": False,
             "play_session_id": "",
         }
     resolved = resolve_playback_item(film)
     if resolved is None:
-        raise ValueError("没有在已连接的 Emby / Jellyfin 里找到这部影片（检查服务器地址、API Key，或在路径映射里配置两边的路径对应关系）")
+        raise ValueError("没有在已连接的 Emby / Jellyfin 里找到这部影片：请确认媒体服务器已扫描到该文件（播放按文件路径与文件名匹配，不看标题）")
     server, item = resolved
     item_id = str(item.get("Id") or "")
     source_id = str(item.get("MediaSources") and (item["MediaSources"][0].get("Id") or "") or "") or item_id
@@ -258,6 +306,7 @@ def film_playback(film: dict, prefer: str = "auto") -> dict:
     response = requests.post(f"{base}/Items/{item_id}/PlaybackInfo", headers=_playback_headers(server), params=params,
                              json={"DeviceProfile": _PLAYBACK_DEVICE_PROFILE,
                                    "MaxStreamingBitrate": _PLAYBACK_DEVICE_PROFILE["MaxStreamingBitrate"],
+                                   "StartTimeTicks": max(0, int(start_seconds or 0)) * 10_000_000,
                                    # 强制转码：直连/直封装在浏览器里经常"能加载但放不出来"
                                    "EnableDirectPlay": False,
                                    "EnableDirectStream": False,
@@ -294,6 +343,8 @@ def film_playback(film: dict, prefer: str = "auto") -> dict:
         "fallback_url": local_url or (direct_url if direct_url != url else ""),
         "container": str((media_source.get("Container") or "")).lower(),
         "transcoding": bool(transcode_url),
+        "hls": ".m3u8" in transcode_url,
+        "start_seconds": max(0, int(start_seconds or 0)),
         "play_session_id": str(data.get("PlaySessionId") or ""),
     }
 

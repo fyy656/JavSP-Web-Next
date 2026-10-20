@@ -40,7 +40,7 @@
   const state = {
     libraries: [], activeLibraryId: '', films: [], total: 0, stats: {}, offset: 0,
     status: 'all', query: '', sort: 'updated', groupBy: '', group: null, groupMode: readGroupMode(), groups: [],
-    groupsVisible: GROUP_PAGE, librariesFresh: false, playingFilmId: '',
+    groupsVisible: GROUP_PAGE, librariesFresh: false, playingFilmId: '', previousFilmId: '', playerSwitching: false,
     allCount: 0, allCovers: [],
     loading: false, loaded: false, active: null, nfo: null, pollTimer: null, busy: false,
   };
@@ -762,7 +762,30 @@
   const playbackKey = (filmId) => PLAYBACK_KEY_PREFIX + filmId;
   let player = null;          // ArtPlayer 实例（没有 ArtPlayer 时退回原生 <video>）
   let playerTimer = 0;
+  let stallTimer = 0;
   let playerPayload = null;
+
+  function clearStallTimer() {
+    if (typeof window.clearTimeout === 'function') window.clearTimeout(stallTimer);
+    stallTimer = 0;
+  }
+
+  function watchPlaybackStall() {
+    clearStallTimer();
+    if (typeof window.setTimeout !== 'function') return;
+    stallTimer = window.setTimeout(async () => {
+      if (!state.playingFilmId) return;
+      const video = playerVideo();
+      if (video && video.readyState >= 2) return;      // 已经拿到元数据，说明在播
+      if (playerPayload?.fallback_mode !== 'emby' || playbackRetrying) return;
+      playbackRetrying = true;
+      const ok = await retryWithEmby();
+      playbackRetrying = false;
+      if (ok) {
+        showToast('直连播放没有开始（可能是编码不被浏览器支持），已改用转码播放', 'danger');
+      }
+    }, 6000);
+  }
 
   function readPlaybackPosition(filmId) {
     try {
@@ -825,6 +848,19 @@
     }
   }
 
+  function abortAllMedia() {
+    abortMediaElement(playerVideo());
+    const { video, box } = playbackElements();
+    abortMediaElement(video);
+    const sweep = (node) => {
+      if (!node || typeof node.querySelectorAll !== 'function') return;
+      node.querySelectorAll('video,audio').forEach((element) => abortMediaElement(element));
+    };
+    sweep(box);
+    sweep(el('library-player-dialog'));
+    sweep(document.body);
+  }
+
   function notifyPlaybackStopped(payload) {
     const filmId = state.playingFilmId;
     if (!filmId) return;
@@ -839,7 +875,7 @@
     }
   }
 
-  function destroyPlayer() {
+  function destroyPlayer({ keepDialog = false } = {}) {
     const { video, info } = playbackElements();
     const current = playerVideo();
     if (state.playingFilmId && current && Number.isFinite(current.currentTime)) {
@@ -847,20 +883,22 @@
     }
     notifyPlaybackStopped(playerPayload);
     if (player) {
-      const media = player.video;
       try { player.pause(); } catch (error) { /* ignore */ }
-      abortMediaElement(media);
       try { if (typeof player.destroy === 'function') player.destroy(false); } catch (error) { /* ignore */ }
       player = null;
-      const { box } = playbackElements();
-      if (box) box.innerHTML = '';
     }
-    abortMediaElement(video);
+    // ArtPlayer 销毁后 <video> 可能还挂在 DOM 上继续播（只剩声音），这里统一清干净
+    abortAllMedia();
+    const { box } = playbackElements();
+    if (box) box.innerHTML = '';
     if (info) info.textContent = '';
-    const dialog = el('library-player-dialog');
-    if (dialog && dialog.open) {
-      try { dialog.close(); } catch (error) {
-        try { dialog.removeAttribute('open'); } catch (inner) { /* ignore */ }
+    clearStallTimer();
+    if (!keepDialog) {
+      const dialog = el('library-player-dialog');
+      if (dialog && dialog.open) {
+        try { dialog.close(); } catch (error) {
+          try { dialog.removeAttribute('open'); } catch (inner) { /* ignore */ }
+        }
       }
     }
     state.playingFilmId = '';
@@ -879,6 +917,23 @@
         container: box,
         url: '',
         autoplay: false,
+        customType: {
+          m3u8(video, url, art) {
+            const Hls = window.Hls;
+            if (Hls && typeof Hls.isSupported === 'function' && Hls.isSupported()) {
+              if (art.hls) art.hls.destroy();
+              const hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+              hls.loadSource(url);
+              hls.attachMedia(video);
+              art.hls = hls;
+              art.once('destroy', () => hls.destroy());
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+              art.url = url;
+            } else {
+              art.notice.show = '当前浏览器不支持 HLS 播放';
+            }
+          },
+        },
         airplay: true,
         theme: '#2f6fed',
         volume: 0.85,
@@ -972,16 +1027,24 @@
     return playFilm(filmId);
   }
 
-  async function playFilm(filmId) {
+  async function playFilm(filmId, options = {}) {
     const { panel, info } = playbackElements();
     if (!panel) return;
+    const prefer = options.mode || 'auto';
+    const startAt = Math.max(0, Math.floor(Number(options.start) || 0));
     try {
-      const payload = await api(`/api/library/films/${encodeURIComponent(filmId)}/playback`);
+      const query = new URLSearchParams();
+      if (prefer !== 'auto') query.set('prefer', prefer);
+      if (startAt > 0) query.set('start', String(startAt));
+      const suffix = query.toString() ? `?${query}` : '';
+      const payload = await api(`/api/library/films/${encodeURIComponent(filmId)}/playback${suffix}`);
       if (!payload?.url) throw new Error('没有拿到可播放的地址');
       state.playingFilmId = filmId;
+      state.previousFilmId = filmId;
       playerPayload = payload;
+      updatePlayerModeButton(payload);
       if (info) {
-        const source = payload.mode === 'local' ? '本地直连' : (payload.transcoding ? '转码播放' : '直连播放');
+        const source = payload.mode === 'local' ? '本地直连' : (payload.transcoding ? (payload.hls ? '转码播放（HLS）' : '转码播放') : '直连播放');
         info.textContent = `${source}${payload.server_name ? ' · ' + payload.server_name : ''}`;
       }
       const art = ensureArtPlayer();
@@ -989,7 +1052,7 @@
       const video = playerVideo();
       if (video?.dataset) video.dataset.fallbackUsed = '';
       setPlayerSource(payload.url);
-      const resume = readPlaybackPosition(filmId);
+      const resume = payload.start_seconds > 0 ? payload.start_seconds : readPlaybackPosition(filmId);
       if (resume > 5) {
         const applyResume = () => {
           const current = playerVideo();
@@ -1004,8 +1067,14 @@
         else video?.addEventListener('loadedmetadata', applyResume, { once: true });
       }
       if (art) {
+        art.on('video:loadedmetadata', clearStallTimer);
+        art.on('video:playing', clearStallTimer);
         art.play().catch(() => {});
+        watchPlaybackStall();
       } else {
+        video?.addEventListener('loadedmetadata', clearStallTimer, { once: true });
+        video?.addEventListener('playing', clearStallTimer, { once: true });
+        watchPlaybackStall();
         await video?.play?.().catch((error) => {
           if (error?.name === 'NotAllowedError') {
             showToast('浏览器阻止了自动播放，请再点一次播放键');
@@ -1027,12 +1096,43 @@
     }
   }
 
+  function updatePlayerModeButton(payload) {
+    const button = el('library-player-mode');
+    if (!button) return;
+    const isLocal = payload?.mode === 'local';
+    button.textContent = isLocal ? '转码' : '直连';
+    button.title = isLocal ? '改用媒体服务器转码播放' : '改用本地直连播放';
+    button.dataset.targetMode = isLocal ? 'emby' : 'local';
+  }
+
+  async function switchPlaybackMode() {
+    const button = el('library-player-mode');
+    const filmId = state.previousFilmId || state.playingFilmId;
+    if (!button || !filmId) return;
+    const target = button.dataset.targetMode === 'emby' ? 'emby' : 'local';
+    const current = playerVideo();
+    const position = current && Number.isFinite(current.currentTime) ? Math.floor(current.currentTime) : 0;
+    state.playerSwitching = true;
+    try {
+      destroyPlayer({ keepDialog: true });
+      await playFilm(filmId, { mode: target, start: position });
+    } finally {
+      state.playerSwitching = false;
+    }
+  }
+
   function bindPlayerLifecycle() {
     const playerDialog = el('library-player-dialog');
     if (playerDialog && typeof playerDialog.addEventListener === 'function' && playerDialog.dataset.playerBound !== '1') {
       playerDialog.dataset.playerBound = '1';
-      playerDialog.addEventListener('close', () => destroyPlayer());
-      playerDialog.addEventListener('cancel', () => destroyPlayer());
+      playerDialog.addEventListener('close', () => {
+        if (state.playerSwitching) return;
+        destroyPlayer();
+      });
+      playerDialog.addEventListener('cancel', () => {
+        if (state.playerSwitching) return;
+        destroyPlayer();
+      });
       // 点窗口外的遮罩关闭
       playerDialog.addEventListener('click', (event) => {
         if (event.target === playerDialog) destroyPlayer();
@@ -1263,6 +1363,11 @@
       event.preventDefault();
       event.stopPropagation();
       openPlayer(event.target.closest('[data-lib-play]').dataset.libPlay);
+      return;
+    }
+    if (event.target.closest('#library-player-mode')) {
+      event.preventDefault();
+      switchPlaybackMode();
       return;
     }
     if (event.target.closest('#library-player-close')) {

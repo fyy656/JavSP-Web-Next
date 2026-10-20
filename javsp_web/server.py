@@ -2975,12 +2975,13 @@ def _video_media_type(path: Path) -> str:
 
 
 @app.get("/api/library/films/{film_id}/playback")
-def library_film_playback(film_id: str, prefer: Literal['auto', 'emby'] = 'auto',
+def library_film_playback(film_id: str, prefer: Literal['auto', 'emby', 'local'] = 'auto',
+                          start: int = Query(default=0, ge=0, le=86400 * 24),
                           _: dict = Depends(current_user)) -> dict:
-    """媒体库播放地址：默认本地直连（能播的容器），其余走 Emby/Jellyfin 转码。"""
+    """媒体库播放地址：默认先本地直连，播不了再走媒体服务器转码；可指定起点。"""
     film = _library_film_or_404(film_id, reconcile=False)
     try:
-        return film_playback(film, prefer)
+        return film_playback(film, prefer, start)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except requests.RequestException as exc:
@@ -3008,7 +3009,7 @@ def library_film_stream(film_id: str, request: Request, _: dict = Depends(curren
     if not target.is_file():
         raise HTTPException(status_code=404, detail="视频文件不存在或不可访问")
     if target.suffix.lower() not in LOCAL_PLAYABLE_SUFFIXES:
-        raise HTTPException(status_code=415, detail="这个格式浏览器不能直接播放，请改用媒体服务器转码")
+        raise HTTPException(status_code=415, detail="这不是可播放的视频文件")
     return file_stream_response(request, target, tag=film_id)
 
 

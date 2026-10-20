@@ -30,6 +30,7 @@
 - cloudscraper —— MIT
 - 前端无框架，图标为内联 SVG；图标风格参考 Material Symbols（Apache-2.0）
 - ArtPlayer（`javsp_web/web/assets/artplayer.min.js`，v5.2.5）—— MIT，版权归 ArtPlayer 作者及贡献者所有，用于媒体库内置播放器，文件随仓库分发、不联网加载
+- hls.js（`javsp_web/web/assets/hls.min.js`，v1.5.17）—— Apache-2.0，版权归 hls.js 贡献者所有，用于播放媒体服务器转码出的 HLS 流（可拖动进度条）
 
 ## 使用与分发提示
 
