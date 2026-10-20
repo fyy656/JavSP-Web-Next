@@ -277,13 +277,32 @@
       + `<span class="muted">当前：${escape(name)}</span>`;
   }
 
+  function fileNameOf(film) {
+    const raw = film.video_path || (film.files && film.files[0]) || '';
+    const name = String(raw).split(/[\\/]/).pop() || '';
+    return name.replace(/\.[^.]+$/, '');
+  }
+
+  function hasTitle(film) {
+    return Boolean(String(film.title || '').trim());
+  }
+
+  /** 卡片/详情标题：缺少标题时用文件名，避免显示可能是错的番号 */
+  function displayName(film) {
+    return hasTitle(film) ? (film.title || '') : fileNameOf(film) || film.dvdid || '—';
+  }
+
+  function headlineOf(film) {
+    return hasTitle(film) ? (film.dvdid || '—') : (fileNameOf(film) || film.dvdid || '—');
+  }
+
   function cardMarkup(film) {
     const status = toneFor(film);
     const cover = film.cover_path
       ? `<img loading="lazy" alt="" src="/api/library/films/${encodeURIComponent(film.id)}/cover?v=${encodeURIComponent(film.updated_at || '')}" onerror="this.closest('.lib-cover').classList.add('lib-cover--empty');this.remove()">`
       : '';
     const placeholder = `<span class="lib-cover-text">${escape(film.dvdid || (film.files?.[0] || '').split(/[\\/]/).pop() || '无封面')}</span>`;
-    const title = film.title || '（缺少标题）';
+    const title = hasTitle(film) ? film.title : (film.dvdid ? `缺资料 · ${film.dvdid}` : '（缺少标题）');
     const meta = [film.detached ? '已整理' : '', film.release_date?.slice(0, 4), film.studio].filter(Boolean).join(' · ') || '—';
     const parts = (film.files || []).length > 1 ? `<span class="lib-parts">${film.files.length} 个文件</span>` : '';
     const action = film.scrape_state === 'queued' || film.scrape_state === 'running'
@@ -297,8 +316,8 @@
       <button class="lib-cover-play" type="button" data-lib-play="${escape(film.id)}" aria-label="播放 ${escape(film.dvdid || '影片')}"><span aria-hidden="true">▶</span></button>
       </div>
       <div class="lib-info">
-        <strong class="lib-id">${escape(film.dvdid || '—')}</strong>
-        <span class="lib-title" title="${escape(film.title)}">${escape(title)}</span>
+        <strong class="lib-id">${escape(headlineOf(film))}</strong>
+        <span class="lib-title" title="${escape(displayName(film))}">${escape(title)}</span>
         <small class="lib-meta">${escape(meta)}</small>
       </div>
       <div class="lib-actions">${action}<button class="button small" type="button" data-lib-open="${escape(film.id)}" title="编辑番号等资料">资料</button></div>
@@ -975,6 +994,7 @@
       const payload = await api(`/api/library/films/${encodeURIComponent(state.playingFilmId)}/playback?prefer=emby`);
       if (!payload?.url) return false;
       playerPayload = { ...payload, fallback_mode: '' };
+      updatePlayerStatus(playerPayload);
       setPlayerSource(payload.url);
       player?.play?.();
       if (player) {
@@ -1028,7 +1048,7 @@
   }
 
   async function playFilm(filmId, options = {}) {
-    const { panel, info } = playbackElements();
+    const { panel } = playbackElements();
     if (!panel) return;
     const prefer = options.mode || 'auto';
     const startAt = Math.max(0, Math.floor(Number(options.start) || 0));
@@ -1042,11 +1062,7 @@
       state.playingFilmId = filmId;
       state.previousFilmId = filmId;
       playerPayload = payload;
-      updatePlayerModeButton(payload);
-      if (info) {
-        const source = payload.mode === 'local' ? '本地直连' : (payload.transcoding ? (payload.hls ? '转码播放（HLS）' : '转码播放') : '直连播放');
-        info.textContent = `${source}${payload.server_name ? ' · ' + payload.server_name : ''}`;
-      }
+      updatePlayerStatus(payload);
       const art = ensureArtPlayer();
       if (!art) bindNativePlayer();
       const video = playerVideo();
@@ -1094,6 +1110,16 @@
       destroyPlayer();
       showToast(error.message || '暂时无法播放该影片', 'danger');
     }
+  }
+
+  function updatePlayerStatus(payload) {
+    updatePlayerModeButton(payload);
+    const { info } = playbackElements();
+    if (!info) return;
+    const source = payload?.mode === 'local'
+      ? '本地直连'
+      : (payload?.transcoding ? (payload.hls ? '转码播放（HLS）' : '转码播放') : '直连播放');
+    info.textContent = `${source}${payload?.server_name ? ' · ' + payload.server_name : ''}`;
   }
 
   function updatePlayerModeButton(payload) {
@@ -1204,7 +1230,7 @@
       state.nfo = nfo || { content: '', mtime: 0 };
       const dialog = el('library-film-dialog');
       const title = el('library-film-title');
-      if (title) title.textContent = film.dvdid || '影片详情';
+      if (title) title.textContent = headlineOf(film) || '影片详情';
       const content = el('library-film-content');
       if (content) content.innerHTML = detailMarkup(film);
       if (dialog) {

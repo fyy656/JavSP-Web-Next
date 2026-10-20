@@ -704,6 +704,11 @@ async function main() {
     assert.match(librarySource, /destroyPlayer\(\{ keepDialog: true \}\)/, '切换模式时不要关播放窗口');
     assert.match(librarySource, /state\.playerSwitching = true/, '切换期间要屏蔽 close 事件');
     assert.match(librarySource, /function abortAllMedia\(/, '关闭时要清理所有残留媒体元素');
+    assert.match(librarySource, /function headlineOf\(/, '缺标题时用文件名做标题');
+    assert.match(librarySource, /fileNameOf\(film\)/, '卡片要能取到文件名');
+    assert.match(librarySource, /escape\(headlineOf\(film\)\)/, '卡片与详情都用统一标题');
+    assert.match(librarySource, /function updatePlayerStatus\(/, '状态显示要统一更新');
+    assert.match(librarySource, /updatePlayerStatus\(playerPayload\)/, '自动切到转码后要刷新状态');
     assert.ok(fs.existsSync(path.join(__dirname, '../javsp_web/web/assets/hls.min.js')), 'hls.js 要随仓库分发');
     assert.match(librarySource, /fallback_mode === 'emby'/, '本地播不了要回退到 Emby');
     assert.ok(fs.existsSync(path.join(__dirname, '../javsp_web/web/assets/artplayer.min.js')), 'ArtPlayer 文件要随仓库分发');
