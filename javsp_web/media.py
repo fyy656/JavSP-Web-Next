@@ -13,6 +13,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
+from .oplog import get as _get_logger
 from .storage import list_media_servers, list_path_mappings
 
 
@@ -140,6 +141,8 @@ def _playback_headers(server: dict) -> dict:
 
 # 浏览器（Chrome/Edge/Safari/手机）能直接解码的容器；其余交给 Emby 转码
 # 默认所有视频容器都先走本地直连；浏览器解不了时再退回媒体服务器转码
+logger = _get_logger("playback")
+
 LOCAL_PLAYABLE_SUFFIXES = {
     ".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".wmv", ".asf",
     ".mpg", ".mpeg", ".m2ts", ".mts", ".ts", ".flv", ".rmvb", ".rm",
@@ -330,6 +333,9 @@ def film_playback(film: dict, prefer: str = "auto", start_seconds: int = 0) -> d
     if not direct_url:
         # 强制转码时 Emby 不会给直连地址，这里自己拼一个静态流作为兜底
         direct_url = absolute(f"/videos/{item_id}/original.mp4?MediaSourceId={quote(source_id)}&DeviceId=javsp-web-player")
+    logger.info("开始转码播放: %s 服务器=%s 条目=%s 模式=%s 起点=%s 秒",
+                film.get("dvdid") or film.get("id") or "", server.get("name") or server.get("type") or "",
+                item_id, "HLS" if ".m3u8" in transcode_url else "MP4", max(0, int(start_seconds or 0)))
     url = transcode_url or direct_url
     if not url:
         raise ValueError("媒体服务器没有返回可播放的地址（请在 Emby 里确认该影片可以播放/允许转码）")
@@ -368,6 +374,8 @@ def stop_playback(server_id: str = "", play_session_id: str = "") -> dict:
             results.append({"server_id": server.get("id"), "stopped": response.status_code < 400})
         except requests.RequestException as exc:
             results.append({"server_id": server.get("id"), "stopped": False, "error": str(exc)[:120]})
+        logger.info("停止转码播放: 服务器=%s 会话=%s 结果=%s", server.get("name") or server.get("id") or "",
+                    play_session_id or "无", "已取消" if results[-1].get("stopped") else "未确认")
         if play_session_id:
             try:
                 requests.post(f"{base}/Sessions/Playing/Stopped", headers=headers,

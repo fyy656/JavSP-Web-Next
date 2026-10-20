@@ -16,14 +16,9 @@ import anyio
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, StreamingResponse
 
-logger = logging.getLogger("javsp_web.library")
-if not logger.handlers:
-    # uvicorn 的日志配置不会带上应用自己的 logger，这里单独挂一个控制台 handler
-    _handler = logging.StreamHandler()
-    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    logger.addHandler(_handler)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
+from .oplog import get as _get_logger
+
+logger = _get_logger("playback")
 
 CHUNK_SIZE = 256 * 1024
 
@@ -47,7 +42,7 @@ def stop_stream(key: str) -> bool:
     if event is None:
         return False
     event.set()
-    logger.info("已叫停本地直连播放: %s", key)
+    logger.info("已叫停本地直连播放: %s（收到停止请求）", key)
     return True
 _MEDIA_TYPES = {
     ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
@@ -117,6 +112,9 @@ def file_stream_response(request: Request, path: Path, tag: str = "") -> Streami
     cancel_event = _stream_event(tag or str(path))
 
     async def stream():
+        import time as _time
+
+        started = _time.monotonic()
         sent = 0
         reason = "正常结束"
         handle = await anyio.to_thread.run_sync(path.open, "rb")
@@ -143,8 +141,12 @@ def file_stream_response(request: Request, path: Path, tag: str = "") -> Streami
             await anyio.to_thread.run_sync(handle.close)
             if _ACTIVE_STREAMS.get(tag or str(path)) is cancel_event:
                 _ACTIVE_STREAMS.pop(tag or str(path), None)
-            logger.info("本地直连播放结束: %s 发送 %.1f MB（%s）", tag, sent / 1024 / 1024, reason)
+            elapsed = _time.monotonic() - started
+            logger.info("本地直连播放结束: %s 发送 %.1f MB / 用时 %.1f 秒（%s）",
+                        tag, sent / 1024 / 1024, elapsed, reason)
 
-    logger.info("开始本地直连播放: %s Range=%s（%s 字节）", tag, request.headers.get("range", "无"), length)
+    client = getattr(getattr(request, "client", None), "host", "") or "未知"
+    logger.info("开始本地直连播放: %s 客户端=%s Range=%s 长度=%s 字节",
+                tag, client, request.headers.get("range", "无"), length)
     return StreamingResponse(stream(), status_code=status_code, headers=headers,
                              media_type=media_type_for(path))

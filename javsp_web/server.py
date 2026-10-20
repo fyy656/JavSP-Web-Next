@@ -3010,7 +3010,8 @@ def library_film_stream(film_id: str, request: Request, _: dict = Depends(curren
         raise HTTPException(status_code=404, detail="视频文件不存在或不可访问")
     if target.suffix.lower() not in LOCAL_PLAYABLE_SUFFIXES:
         raise HTTPException(status_code=415, detail="这不是可播放的视频文件")
-    return file_stream_response(request, target, tag=film_id)
+    tag = str(film.get("dvdid") or "") or film_id
+    return file_stream_response(request, target, tag=tag)
 
 
 @app.get("/api/library/films/{film_id}/cover")

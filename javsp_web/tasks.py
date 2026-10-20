@@ -29,6 +29,7 @@ from .config_validation import load_base_config, validate_config_data
 from .cookiecloud import CookieCloudError, cookiecloud_summary, get_synced_cookies
 from .timeutils import now_iso
 from .task_logs import build_log_entries, log_text, readable_error
+from .oplog import get as _get_logger
 
 
 _lock = threading.RLock()
@@ -1577,6 +1578,9 @@ def _prepare_tasks(
     return prepared
 
 
+scrape_logger = _get_logger("scrape")
+
+
 def _run_task(task: dict) -> None:
     if task.get("task_type") == "scan":
         from .task_scans import run_scan
@@ -1594,6 +1598,9 @@ def _run_task(task: dict) -> None:
     task["status"] = "running"
     task["started_at"] = now_iso()
     _persist(task)
+    label = str(task.get("forced_avid") or task.get("input_directory") or task.get("id") or "")
+    scrape_logger.info("刮削开始: %s 任务=%s 并发=%s", label, task.get("id"), task.get("concurrency") or 1)
+    started_at = time.monotonic()
     command = [sys.executable, "--run-javsp", "-c", task["config_path"]] if IS_FROZEN else [sys.executable, "-m", "javsp", "-c", task["config_path"]]
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join((str(CUSTOM_CRAWLERS_DIR), str(VENDOR_DIR), str(Path(__file__).resolve().parent.parent), env.get("PYTHONPATH", "")))
@@ -1660,6 +1667,9 @@ def _run_task(task: dict) -> None:
         task["return_code"] = code
         cancelled = task["id"] in _cancelled_tasks or task.get("status") == "cancelled"
         task["status"] = "cancelled" if cancelled else ("succeeded" if code == 0 else "failed")
+        scrape_logger.info("刮削结束: %s 任务=%s 结果=%s 用时=%.1f 秒%s",
+                           label, task.get("id"), task["status"], time.monotonic() - started_at,
+                           "" if code == 0 else f" 返回码={code}")
         if cancelled:
             task["error"] = None
             _logs.setdefault(task["id"], []).append("任务已停止")
@@ -1683,6 +1693,7 @@ def _run_task(task: dict) -> None:
         task["status"] = "failed"
         task["error"] = str(exc)
         _logs.setdefault(task["id"], []).append(f"启动失败: {exc}")
+        scrape_logger.error("刮削异常: %s 任务=%s 原因=%s", label, task.get("id"), exc)
     finally:
         if cookiecloud_file:
             try:
