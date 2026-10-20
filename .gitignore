@@ -32,3 +32,6 @@ exe-icon-preview.png
 # IDE and local assistant workspace
 .idea/
 .workbuddy-ai/
+
+# 内部验收/审计资料，不进入公开仓库
+docs/reports/
