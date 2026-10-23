@@ -353,6 +353,57 @@ async function main() {
     assert.equal(element('library-film-scrape').disabled, false);
   }
 
+  // 13.5) 详情页女优名可点击：跳到该女优的分类影片列表
+  {
+    const actressFilm = film({ actress: ['演员甲', '演员乙'] });
+    const { library, element, calls, listeners } = boot({
+      routes: {
+        '/api/library/libraries': { libraries: [libraryEntry('lib-a', '主库', [folder('r-1', 'A')])] },
+        '/api/library/groups': {
+          by: 'actress',
+          groups: [
+            { key: '演员甲', name: '演员甲', count: 2 },
+            { key: '演员乙', name: '演员乙', count: 1 },
+          ],
+          total: 3,
+          stats: {},
+        },
+        '/api/library/films/f-1': { film: actressFilm },
+        '/api/library/films/f-1/nfo': { content: '', path: '', mtime: 0 },
+        '/api/library/films': filmPage([actressFilm], { total: 2 }),
+      },
+    });
+    assert.doesNotMatch(library.internals.detailMarkup(film({ actress: [] })), /data-lib-actress/,
+      '没有女优时不渲染跳转链接');
+
+    await library.load();
+    await library.open('f-1');
+    const markup = element('library-film-content').innerHTML;
+    assert.match(markup, /查看作品/);
+    assert.match(markup, /class="lib-actress-link"[^>]*data-lib-actress="演员甲"/);
+    assert.match(markup, /class="lib-actress-link"[^>]*data-lib-actress="演员乙"/);
+
+    listeners.click({
+      target: {
+        closest: (selector) => (selector === '[data-lib-actress]'
+          ? { dataset: { libActress: '演员乙' } }
+          : null),
+      },
+      preventDefault() {},
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const state = library.internals.state;
+    assert.equal(state.groupBy, 'actress');
+    assert.equal(state.group, '演员乙');
+    assert.equal(state.status, 'all');
+    assert.equal(state.query, '');
+    const filmCall = calls.filter((call) => call.url.startsWith('/api/library/films')).at(-1);
+    assert.match(filmCall.url, /group_by=actress/);
+    assert.match(filmCall.url, /group=%E6%BC%94%E5%91%98%E4%B9%99/);
+    assert.match(filmCall.url, /library_id=lib-a/);
+    assert.match(element('library-group-nav').innerHTML, /当前：演员乙/);
+  }
+
   // 14) 扫描：按媒体库发起，轮询到 succeeded 后刷新
   {
     let polls = 0;
@@ -593,18 +644,23 @@ async function main() {
     assert.equal(element('library-add-folder').hidden, true, '全部影片下不显示添加文件夹');
     assert.equal(element('library-settings').hidden, true);
 
-    // 扫描会依次扫描每个库
+    // 全部影片是汇总视图：不显示扫描按钮，也不允许误扫所有库
+    assert.equal(element('library-scan').hidden, true, '全部影片下隐藏扫描按钮');
+    assert.equal(element('library-scan').disabled, true);
     await library.scan();
-    assert.ok(calls.some((call) => call.url === '/api/library/libraries/lib-a/scan'));
-    assert.ok(calls.some((call) => call.url === '/api/library/libraries/lib-b/scan'));
+    assert.equal(calls.filter((call) => call.url.endsWith('/scan')).length, 0, '全部影片下不发起扫描');
 
-    // 回到具体库
+    // 回到具体库：只扫描当前选中的库
     listeners.click({ target: { closest: (selector) => (selector === '[data-lib-library]' ? { dataset: { libLibrary: 'lib-b' } } : null) }, preventDefault() {} });
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(state.activeLibraryId, 'lib-b');
     const backCall = calls.filter((call) => call.url.startsWith('/api/library/films')).at(-1);
     assert.match(backCall.url, /library_id=lib-b/);
     assert.equal(element('library-add-folder').hidden, false);
+    assert.equal(element('library-scan').hidden, false, '具体库下显示扫描按钮');
+    await library.scan();
+    assert.ok(calls.some((call) => call.url === '/api/library/libraries/lib-b/scan'), '只扫描当前库');
+    assert.ok(!calls.some((call) => call.url === '/api/library/libraries/lib-a/scan'), '不扫描其它库');
   }
 
   // 20) 批量刮削：按当前筛选提交，并提示预设必需字段

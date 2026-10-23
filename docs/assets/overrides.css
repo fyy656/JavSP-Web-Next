@@ -885,6 +885,10 @@ html[data-privacy-mode="1"] .overview-cover:hover .library-artwork img,html[data
 .lib-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
 .lib-fields label { display: grid; gap: 4px; font-size: 12px; color: var(--text-secondary); }
 .lib-fields .lib-plot { grid-column: 1 / -1; }
+.lib-fields .lib-actress-field { display: grid; gap: 4px; align-content: start; min-width: 0; }
+.lib-actress-links { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 11px; color: var(--text-muted); }
+.lib-actress-link { padding: 0; border: 0; background: none; color: var(--accent-text); font: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.lib-actress-link:hover { color: var(--accent); }
 .lib-fields > .muted { font-size: 11px; }
 .lib-nfo { margin: 14px 0 0; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
 .lib-nfo summary { cursor: pointer; font-size: 13px; font-weight: 600; }

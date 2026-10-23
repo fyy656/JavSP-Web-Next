@@ -148,7 +148,8 @@
   function foldersMarkup() {
     if (libraryIsAll()) {
       const total = allLibraryCount();
-      return `<span class="lib-folders-label">全部媒体库 · ${state.libraries.length} 个库 · ${total} 部影片</span>`;
+      return `<span class="lib-folders-label">全部媒体库 · ${state.libraries.length} 个库 · ${total} 部影片`
+        + ' · 扫描请在具体媒体库下进行</span>';
     }
     const library = activeLibrary();
     if (!library) return '';
@@ -371,6 +372,9 @@
       modeButton.textContent = state.groupMode === 'cards' ? '列表视图' : '卡片视图';
       modeButton.title = state.groupMode === 'cards' ? '切换为标签列表' : '切换为封面卡片';
     }
+    const groupSelect = el('library-group');
+    // 从详情页的女优链接直接进入分类时，下拉框也要显示当前分类
+    if (groupSelect && groupSelect.value !== (state.groupBy || '')) groupSelect.value = state.groupBy || '';
     const grid = el('library-grid');
     if (grid) {
       grid.innerHTML = showCards ? '' : gridMarkup();
@@ -383,7 +387,12 @@
       more.textContent = remaining > 0 ? `加载更多（还有 ${remaining} 部）` : '加载更多';
     }
     const scanButton = el('library-scan');
-    if (scanButton) scanButton.disabled = !hasLibraries;
+    if (scanButton) {
+      // 「全部影片」是跨库汇总视图，没有可扫描的单一媒体库；扫描只对具体库生效
+      scanButton.hidden = !hasLibraries || libraryIsAll();
+      scanButton.disabled = !hasLibraries || libraryIsAll();
+      scanButton.title = '扫描当前媒体库的文件夹';
+    }
     const batchButton = el('library-batch-scrape');
     if (batchButton) {
       batchButton.disabled = !hasLibraries || !state.activeLibraryId || !state.total;
@@ -523,17 +532,18 @@
   }
 
   async function scan() {
-    if (!state.activeLibraryId) return;
-    const targets = libraryIsAll() ? state.libraries.map((library) => library.id) : [state.activeLibraryId];
-    if (!targets.length) return;
+    // 扫描只针对当前选中的具体媒体库；「全部影片」是汇总视图，不触发扫描
+    if (!state.activeLibraryId || libraryIsAll()) {
+      message('请先选择一个媒体库，再点扫描');
+      return;
+    }
+    const libraryId = state.activeLibraryId;
     const button = el('library-scan');
     if (button) button.disabled = true;
     try {
-      for (const libraryId of targets) {
-        const { scan: job } = await api(`/api/library/libraries/${encodeURIComponent(libraryId)}/scan`,
-          { method: 'POST' });
-        await pollScan(job.id);
-      }
+      const { scan: job } = await api(`/api/library/libraries/${encodeURIComponent(libraryId)}/scan`,
+        { method: 'POST' });
+      await pollScan(job.id);
       await refresh();
     } catch (error) {
       message(error.message || '扫描失败');
@@ -1184,6 +1194,11 @@
       ? `<img alt="" src="/api/library/films/${encodeURIComponent(film.id)}/cover?v=${encodeURIComponent(film.updated_at || '')}">`
       : '<span class="lib-cover-text">无封面</span>';
     const field = (name, label, value, extra = '') => `<label>${label}<input data-lib-field="${name}" value="${escape(value ?? '')}"${extra}></label>`;
+    const actressNames = (Array.isArray(film.actress) ? film.actress : String(film.actress || '').split(/[、,，;；]/))
+      .map((name) => String(name || '').trim()).filter(Boolean);
+    const actressLinks = actressNames.length
+      ? `<span class="lib-actress-links"><span>查看作品：</span>${actressNames.map((name) => `<button class="lib-actress-link" type="button" data-lib-actress="${escape(name)}" title="查看 ${escape(name)} 的影片">${escape(name)}</button>`).join('')}</span>`
+      : '';
     return `<div class="lib-detail-head">
         <div class="lib-detail-cover${film.cover_path ? '' : ' lib-cover--empty'}">${cover}</div>
         <div class="lib-detail-summary">
@@ -1203,7 +1218,10 @@
         <small class="muted">${source}</small>
         ${field('title', '标题', film.title)}
         ${field('original_title', '原始标题', film.original_title)}
-        ${field('actress', '女优（用顿号或逗号分隔）', (film.actress || []).join('、'))}
+        <div class="lib-actress-field">
+          <label>女优（用顿号或逗号分隔）<input data-lib-field="actress" value="${escape(actressNames.join('、'))}"></label>
+          ${actressLinks}
+        </div>
         ${field('release_date', '发行日期', film.release_date, ' placeholder="YYYY-MM-DD"')}
         ${field('studio', '片商', film.studio)}
         ${field('publisher', '发行商', film.publisher)}
@@ -1247,6 +1265,26 @@
       if (error) error.textContent = '';
     } catch (error) {
       showToast(error.message || '读取影片详情失败', 'danger');
+    }
+  }
+
+  /** 从详情页的女优名跳到该女优的分类影片列表 */
+  async function openActress(name) {
+    const target = String(name || '').trim();
+    if (!target) return;
+    el('library-film-dialog')?.close();
+    state.groupBy = 'actress';
+    state.group = target;
+    state.status = 'all';
+    state.query = '';
+    state.offset = 0;
+    state.groupsVisible = GROUP_PAGE;
+    const search = el('library-page-search');
+    if (search) search.value = '';
+    await refresh();
+    const panel = document.querySelector('[data-panel="library"]');
+    if (panel && typeof panel.scrollIntoView === 'function') {
+      panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   }
 
@@ -1426,6 +1464,12 @@
       state.group = groupCard.dataset.libGroupCard;
       state.offset = 0;
       refresh();
+      return;
+    }
+    const actressLink = event.target.closest('[data-lib-actress]');
+    if (actressLink) {
+      event.preventDefault();
+      openActress(actressLink.dataset.libActress);
       return;
     }
     if (event.target.closest('#library-group-back')) {
