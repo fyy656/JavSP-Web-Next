@@ -138,7 +138,8 @@ test('every migrated color token resolves and fixed artwork colors are explicitl
   const styles = files.map(file => read(`javsp_web/web/assets/${file}`));
   const definitions = new Set([...styles.join('\n').matchAll(/(--[\w-]+)\s*:/g)].map(m => m[1]));
   for (const [i, css] of styles.entries()) {
-    for (const match of css.matchAll(/var\((--[\w-]+)/g)) assert.ok(definitions.has(match[1]) || ['--progress', '--i', '--hue', '--tone', '--title-scale'].includes(match[1]), `${files[i]}: undefined ${match[1]}`);
+    // --lib-card-size 由脚本按“海报大小”四档写在元素上，不属于主题变量
+    for (const match of css.matchAll(/var\((--[\w-]+)/g)) assert.ok(definitions.has(match[1]) || ['--progress', '--i', '--hue', '--tone', '--title-scale', '--lib-card-size'].includes(match[1]), `${files[i]}: undefined ${match[1]}`);
   }
   assert.ok(definitions.has('--control-border'), 'interactive boundaries need their own theme token');
   for (const name of ['app.css', 'overrides.css']) {
@@ -151,4 +152,16 @@ test('every migrated color token resolves and fixed artwork colors are explicitl
   }
   const cinema = read('javsp_web/web/assets/cinema.css');
   assert.doesNotMatch(cinema, /body:has\(\.view\.active\[data-panel="overview"\]\)|html\[data-initial-view="overview"\]/);
+});
+
+test('every css rule keeps its opening brace', () => {
+  // 批量改写 CSS 注释时最容易把规则的 `{` 吃掉：规则还在、样式全失效，肉眼很难发现。
+  for (const file of ['theme.css', 'app.css', 'overrides.css', 'cinema.css']) {
+    const css = read(`javsp_web/web/assets/${file}`).replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.equal((css.match(/\{/g) || []).length, (css.match(/\}/g) || []).length, `${file}: 花括号不配对`);
+    for (const line of css.split('\n')) {
+      if (!line.trim() || line.startsWith(' ') || line.includes('{')) continue;
+      assert.doesNotMatch(line, /\S\s{2,}[a-z-]+\s*:/, `${file}: 规则缺少左花括号 → ${line.slice(0, 60)}`);
+    }
+  }
 });

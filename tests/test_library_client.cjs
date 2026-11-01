@@ -10,7 +10,9 @@ function makeElement(value = '') {
   const classes = new Set();
   return {
     value, textContent: '', innerHTML: '', hidden: false, disabled: false, checked: true,
-    options: [], dataset: {}, showModal() {}, close() {},
+    options: [], dataset: {},
+    style: { values: {}, setProperty(name, value) { this.values[name] = value; } },
+    showModal() {}, close() {},
     classList: {
       add: (name) => classes.add(name),
       remove: (name) => classes.delete(name),
@@ -166,7 +168,7 @@ async function main() {
 
   // 5) load()：先取库列表，再取当前库的影片，并渲染标签页/统计/卡片
   {
-    const { library, element, calls } = boot({
+    const { library, element, calls, listeners, context } = boot({
       routes: {
         '/api/library/libraries': {
           libraries: [libraryEntry('lib-a', '主库', [folder('r-1', 'A')])],
@@ -184,6 +186,20 @@ async function main() {
     assert.equal(element('library-scan').disabled, false);
     assert.equal(element('library-body').hidden, false);
     assert.equal(element('library-empty').hidden, true);
+    assert.equal(element('library-grid').style.values['--lib-card-size'], '150px');
+    assert.equal(library.internals.state.posterTier, 'medium');
+
+    listeners.click({
+      target: {
+        closest: (selector) => (selector === '[data-poster-tier]'
+          ? { dataset: { posterTier: 'large' } }
+          : null),
+      },
+      preventDefault() {},
+    });
+    assert.equal(element('library-grid').style.values['--lib-card-size'], '190px');
+    assert.equal(library.internals.state.posterTier, 'large');
+    assert.equal(context.localStorage.getItem('javsp-web.library-poster-size'), 'large');
   }
 
   // 6) 没有媒体库时显示空状态，并隐藏主体
@@ -768,6 +784,126 @@ async function main() {
     assert.ok(fs.existsSync(path.join(__dirname, '../javsp_web/web/assets/hls.min.js')), 'hls.js 要随仓库分发');
     assert.match(librarySource, /fallback_mode === 'emby'/, '本地播不了要回退到 Emby');
     assert.ok(fs.existsSync(path.join(__dirname, '../javsp_web/web/assets/artplayer.min.js')), 'ArtPlayer 文件要随仓库分发');
+  }
+
+  // 剧集库：卡片显示季/集与 NFO 状态，季标签按接口给的季渲染，分集行带集号
+  {
+    const { library } = boot();
+    const internals = library.internals;
+    const state = internals.state;
+    state.libraries = [{ id: 'lib-series', name: '剧集库', kind: 'series', preset_id: 'default', folders: [] }];
+    state.activeLibraryId = 'lib-series';
+    assert.equal(internals.activeKind(), 'series');
+    assert.equal(internals.seriesMode(), true);
+
+    const series = {
+      id: 's-1', kind: 'series', title: '风起长林', cover_path: 'D:/poster.jpg', nfo_path: 'D:/tvshow.nfo',
+      season_count: 2, episode_count: 24, updated_at: '2026-11-01T10:00:00+08:00', size_bytes: 2048,
+    };
+    const card = internals.seriesCardMarkup(series);
+    assert.match(card, /风起长林/);
+    assert.match(card, /2 季 · 24 集/, '剧集卡片要显示季数与集数');
+    assert.match(card, /data-tone="success">有 NFO/);
+    assert.match(card, /data-lib-series="s-1"/, '点卡片进入分集');
+    assert.match(card, /data-lib-refresh="s-1"/, '剧集库的按钮是刷新 NFO');
+    assert.doesNotMatch(card, /data-lib-scrape/, '剧集库不联网刮削');
+
+    const noNfo = internals.seriesCardMarkup({ id: 's-2', title: '另一部', cover_path: '', episode_count: 3 });
+    assert.match(noNfo, /data-tone="neutral">无 NFO/);
+    assert.match(noNfo, /还没有分集|3 集/);
+
+    // 季标签来自季接口，不靠分集列表推导（分集是分页的）
+    state.seasons = [{ season: 1, episodes: 12 }, { season: 2, episodes: 12 }, { season: 0, episodes: 2 }];
+    state.seasonFocus = 2;
+    state.films = [
+      { id: 'e-1', season: 1, episode: 1, title: '第一集', cover_path: '' },
+      { id: 'e-2', season: 2, episode: 1, title: '第二季第一集', cover_path: '' },
+      { id: 'e-3', season: 0, episode: 1, title: '特别篇', cover_path: '' },
+    ];
+    const markup = internals.episodesMarkup();
+    assert.match(markup, /data-lib-season="1"[^>]*>第 1 季<span>12<\/span>/);
+    assert.match(markup, /class="lib-tab active" type="button" data-lib-season="2"/, '当前季要高亮');
+    assert.match(markup, /data-lib-season="0">特别篇<span>2<\/span>/, '第 0 季显示为特别篇');
+    assert.match(markup, /S02E01/, '只渲染当前季的分集');
+    assert.doesNotMatch(markup, /S01E01/, '别的季不在这一页');
+    assert.equal(internals.SEASON_LABEL(0), '特别篇');
+    assert.equal(internals.SEASON_LABEL(3), '第 3 季');
+    assert.equal(internals.episodeLabel({ season: 2, episode: 7 }), 'S02E07');
+
+    // 剧集头部（Emby 版式）：大海报 + 标题 + 元信息 + 操作按钮 + 简介
+    state.seriesInfo = { ...series, plot: '这是一段简介', actress: ['演员甲', '演员乙'] };
+    const head = internals.seriesHeaderMarkup();
+    assert.match(head, /<h1 class="lib-hero-title">风起长林<\/h1>/);
+    assert.match(head, /3 季 · 26 集/, '元信息里要带季集统计');
+    assert.match(head, /class="lib-hero-poster"/, '左侧大海报');
+    assert.match(head, /data-lib-series-back/, '返回按钮');
+    assert.match(head, /data-lib-play="e-1">▶ 播放/, '主操作按钮直接播放当前季第一集');
+    assert.match(head, /lib-hero-plot">这是一段简介/, '简介放在头部');
+
+    const strip = internals.episodesMarkup();
+    assert.match(strip, /class="lib-season-head"><h2>第 2 季<\/h2>/, '季标题作为分区标题');
+    assert.match(strip, /id="library-episode-strip"/, '分集是横向滚动条');
+    assert.match(strip, /data-lib-scroll="-1"/);
+    assert.match(strip, /data-lib-scroll="1"/);
+    assert.match(strip, /class="lib-ep-card"/);
+    assert.match(strip, /<span class="lib-ep-no">1<\/span>/, '卡片左上角是集号角标');
+    assert.match(strip, /lib-ep-name">第二季第一集/, '标题压在剧照上');
+    assert.match(strip, /lib-cast-list/, '有演员时显示演职员');
+
+    // 观看进度：只在分集上做标记（看完打勾、看了一部分留进度条），不在播放按钮上写进度
+    const playing = internals.episodeRowMarkup({
+      id: 'e-1', season: 1, episode: 3, title: '第三集',
+      progress: { position: 300, duration: 1800, percent: 16.7, finished: false },
+    });
+    assert.match(playing, /class="lib-ep-progress" style="width:16.7%"/);
+    assert.doesNotMatch(playing, /看到/, '卡片上不写具体时间');
+    assert.doesNotMatch(playing, /lib-ep-done/);
+
+    const done = internals.episodeRowMarkup({
+      id: 'e-2', season: 1, episode: 4, title: '第四集',
+      progress: { position: 1800, duration: 1800, percent: 100, finished: true },
+    });
+    assert.match(done, /lib-ep-done/, '看完的集打勾');
+    assert.doesNotMatch(done, /lib-ep-progress/, '看完的集不再显示进度条');
+
+    state.seriesProgress = { total: 24, watched: 3, resume: { film_id: 'e-9', season: 2, episode: 1, position: 120 } };
+    const resumed = internals.seriesHeaderMarkup();
+    assert.match(resumed, /已看 3\/24 集/);
+    assert.match(resumed, /data-lib-play="e-9">▶ 播放/, '播放按钮只写「播放」，进度不写在按钮上');
+    assert.doesNotMatch(resumed, /继续观看/);
+
+    // 建库与设置里都能选类型
+    const page = fs.readFileSync(path.join(__dirname, '../javsp_web/web/index.html'), 'utf8');
+    assert.match(page, /<option value="series">剧集/, '新建媒体库要能选剧集');
+    assert.match(page, /id="library-settings-kind"/, '媒体库设置里要能改类型');
+  }
+
+  // 剧集详情页：必须铺满整行（不能沿用海报墙的多列网格），返回按钮要在最上面
+  {
+    const { library, element } = boot();
+    const internals = library.internals;
+    const state = internals.state;
+    state.libraries = [{ id: 'lib-series', name: '剧集库', kind: 'series', preset_id: 'default', folders: [] }];
+    state.activeLibraryId = 'lib-series';
+    state.seriesFocus = 's-1';
+    state.seriesInfo = { id: 's-1', title: '风起长林', cover_path: '', size_bytes: 2048 };
+    state.seasons = [{ season: 1, episodes: 2 }];
+    state.seasonFocus = 1;
+    state.films = [
+      { id: 'e-1', season: 1, episode: 1, title: '第一集', cover_path: '' },
+      { id: 'e-2', season: 1, episode: 2, title: '第二集', cover_path: '' },
+    ];
+    internals.render();
+    const grid = element('library-grid');
+    assert.equal(grid.classList.contains('lib-grid--series'), true, '剧集详情页要铺满整行，不能被挤成 168px 的格子');
+    assert.match(grid.innerHTML, /data-lib-series-back/, '剧集页必须有返回按钮');
+    assert.ok(grid.innerHTML.indexOf('data-lib-series-back') < grid.innerHTML.indexOf('<h2>'),
+      '返回按钮要在标题之前，别被内容挤到看不见');
+
+    // 回到剧集列表后恢复海报墙
+    state.seriesFocus = '';
+    internals.render();
+    assert.equal(grid.classList.contains('lib-grid--series'), false);
   }
 
   console.log('library client tests passed');

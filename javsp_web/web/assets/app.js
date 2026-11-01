@@ -2,6 +2,17 @@ const state = { user: null, tasks: [], taskTotal: 0, taskPage: 0, taskPageSize: 
 const OVERVIEW_PAGE_SIZES = [12, 24, 48, 96];
 // 其他脚本（library.js 等）需要读取当前用户，顶层 const 不会自动挂到 window
 window.JavspState = state;
+// 安卓客户端只保留媒体库、刮削与播放：?mobile=1 进入，?mobile=0 退出
+const MOBILE_APP = (() => {
+  try {
+    const flag = new URLSearchParams(location.search).get('mobile');
+    if (flag === '1') localStorage.setItem('javsp-web.mobile-app', '1');
+    else if (flag === '0') localStorage.removeItem('javsp-web.mobile-app');
+    return localStorage.getItem('javsp-web.mobile-app') === '1';
+  } catch (_) {
+    return false;
+  }
+})();
 const savedOverviewPageSize = Number(localStorage.getItem('javsp-web.overview-page-size'));
 state.overviewPage = 1;
 state.overviewPageSize = OVERVIEW_PAGE_SIZES.includes(savedOverviewPageSize) ? savedOverviewPageSize : 24;
@@ -586,7 +597,7 @@ async function api(path, options = {}) {
       const cached = method === 'GET' && path.startsWith('/api/tasks?') ? taskResponses.get(path) : null;
       const conditional = cached ? { 'If-None-Match': cached.etag } : {};
       const response = await fetch(path, { credentials: 'include', ...requestOptions, signal: controller.signal, headers: { 'Content-Type': 'application/json', ...conditional, ...(options.headers || {}) } });
-      if (response.status === 401) { location.href = '/login'; throw new Error('登录已过期'); }
+      if (response.status === 401) { location.href = MOBILE_APP ? '/login?mobile=1' : '/login'; throw new Error('登录已过期'); }
       if (response.status === 304 && cached) return cached.data;
       const data = await response.json();
       if (!response.ok) throw new Error(formatApiError(data.detail, response.status));
@@ -633,7 +644,7 @@ async function uploadTaskCover(taskId, file) {
   const form = new FormData();
   form.append('file', file, file.name || 'cover.jpg');
   const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/cover/upload`, { method: 'POST', credentials: 'include', body: form });
-  if (response.status === 401) { location.href = '/login'; throw new Error('登录已过期'); }
+  if (response.status === 401) { location.href = MOBILE_APP ? '/login?mobile=1' : '/login'; throw new Error('登录已过期'); }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(formatApiError(data.detail, response.status));
   return data;
@@ -2093,7 +2104,7 @@ $('#user-form').addEventListener('submit', async (event) => {
   } catch (error) { message.textContent = error.message; }
 });
 
-$('#logout').addEventListener('click', async () => { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); location.href = '/login'; });
+$('#logout').addEventListener('click', async () => { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); location.href = MOBILE_APP ? '/login?mobile=1' : '/login'; });
 document.querySelectorAll('.nav-item').forEach((button) => {
   button.title = button.textContent.trim();
   button.addEventListener('click', () => showView(button.dataset.view));
@@ -4032,14 +4043,27 @@ if (downloadPolicyToggle && downloadPolicyContent) {
   try {
     const savedView = localStorage.getItem('javsp-web.active-view');
     state.user = await api('/api/auth/me');
-    restoreUpdateOverlay();
+    if (!MOBILE_APP) restoreUpdateOverlay();
     $('#current-user').textContent = state.user.username;
-    try { await window.JavspCommunity.init(); } catch (_) { /* Profile failure must not block scraping. */ }
+    if (!MOBILE_APP) {
+      try { await window.JavspCommunity.init(); } catch (_) { /* Profile failure must not block scraping. */ }
+    }
     if (state.user.role !== 'admin') { $('#settings-nav').remove(); $('#auto-scrape-nav').remove(); $('#crawler-config-nav').remove(); $('#ai-scrape-nav').remove(); }
-    if (savedView && document.querySelector(`[data-panel="${savedView}"]`) && (state.user.role === 'admin' || !['settings', 'auto-scrape', 'crawler-config', 'ai-scrape'].includes(savedView))) showView(savedView);
-    else showView('overview');
-    api('/api/runtime').then((runtime) => { state.runtime = runtime; window.JavspCommunity.configure(runtime.comments_url); checkForAppUpdate(runtime); }).catch(console.error);
-    scheduleGitHubStarInvite();
+    if (MOBILE_APP) {
+      showView('library');
+    } else if (savedView && document.querySelector(`[data-panel="${savedView}"]`) && (state.user.role === 'admin' || !['settings', 'auto-scrape', 'crawler-config', 'ai-scrape'].includes(savedView))) {
+      showView(savedView);
+    } else {
+      showView('overview');
+    }
+    api('/api/runtime').then((runtime) => {
+      state.runtime = runtime;
+      if (!MOBILE_APP) {
+        window.JavspCommunity.configure(runtime.comments_url);
+        checkForAppUpdate(runtime);
+      }
+    }).catch(console.error);
+    if (!MOBILE_APP) scheduleGitHubStarInvite();
   } catch (error) { return; }
   let refreshTimer = null;
   let polling = false;

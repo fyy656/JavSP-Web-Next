@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import logging
 import os
 import re
 import json
@@ -118,6 +119,11 @@ async def _quiet_connection_errors() -> None:
             current_loop.default_exception_handler(context)
 
     loop.set_exception_handler(handler)
+    # 老库第一次打开要补列，先在这里迁移完，别让用户第一次扫描撞上迁移
+    try:
+        library_store.ensure_ready()
+    except Exception:  # noqa: BLE001 - 迁移失败也不该阻止服务启动
+        logging.getLogger("javsp_web.scrape").exception("媒体库 schema 迁移失败")
 from .ai_router import router as ai_router
 app.include_router(ai_router)
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -1141,6 +1147,7 @@ def create_preset(body: PresetBody, _: dict = Depends(require_admin)) -> dict:
         "updated_at": now_iso(),
     }
     save_preset(preset)
+    library_store.invalidate_preset_cache()
     return _public_preset(preset)
 
 
@@ -1153,6 +1160,7 @@ def update_preset(preset_id: str, body: PresetBody, _: dict = Depends(require_ad
     form = prepared["form"]
     current.update({"name": body.name, "mode": body.mode, "content": body.content or "", "form": form, "task_concurrency": body.task_concurrency, "updated_at": now_iso()})
     save_preset(current)
+    library_store.invalidate_preset_cache()
     return _public_preset(current)
 
 
@@ -2551,11 +2559,13 @@ class LibraryCreateBody(BaseModel):
     preset_id: str = "default"
     folders: list[dict] = Field(default_factory=list, max_length=50)
     scan: bool = True
+    kind: Literal["movie", "series"] = "movie"
 
 
 class LibraryUpdateBody(BaseModel):
     name: str | None = Field(default=None, max_length=80)
     preset_id: str | None = None
+    kind: Literal["movie", "series"] | None = None
 
 
 class LibraryFolderBody(BaseModel):
@@ -2629,7 +2639,7 @@ def library_libraries(_: dict = Depends(current_user)) -> dict:
 @app.post("/api/library/libraries", status_code=201)
 def create_library(body: LibraryCreateBody, _: dict = Depends(require_admin)) -> dict:
     try:
-        library = library_store.add_library(body.name, body.preset_id, body.folders)
+        library = library_store.add_library(body.name, body.preset_id, body.folders, body.kind)
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     scan = None
@@ -2646,7 +2656,7 @@ def update_library(library_id: str, body: LibraryUpdateBody, _: dict = Depends(r
     _library_or_404(library_id)
     try:
         library = library_store.update_library(library_id, name=body.name.strip() if body.name is not None else None,
-                                               preset_id=body.preset_id)
+                                               preset_id=body.preset_id, kind=body.kind)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"library": library}
@@ -2716,10 +2726,62 @@ def library_films(library_id: str = "", folder_id: str = "", status: str = "",
                   query: str = Query(default="", max_length=200),
                   group_by: str = "", group: str = Query(default="", max_length=200), sort: str = "updated",
                   direction: Literal["asc", "desc"] = "desc",
+                  kind: str = "", parent: str = "", season: int | None = None,
                   limit: int = Query(default=48, ge=1, le=200), offset: int = Query(default=0, ge=0),
                   _: dict = Depends(current_user)) -> dict:
-    return library_store.list_films(library_id, folder_id, status, query.strip(), group_by, group,
-                                    sort, direction, limit, offset)
+    """影片墙 / 剧集墙 / 分集列表共用：kind=series 时额外带季数与集数。"""
+    payload = library_store.list_films(library_id, folder_id, status, query.strip(), group_by, group,
+                                       sort, direction, limit, offset, kind, parent, season)
+    if kind == "series":
+        counts = library_store.series_stats(library_id, parent)
+        for item in payload["items"]:
+            stat = counts.get(item["id"]) or {}
+            item["episode_count"] = stat.get("episodes", 0)
+            item["season_count"] = stat.get("seasons", 0)
+    return payload
+
+
+@app.get("/api/library/series/{film_id}/seasons")
+def library_series_seasons(film_id: str, _: dict = Depends(current_user)) -> dict:
+    """剧集的季列表 + 观看进度：分集是分页的，季标签和「看到哪」必须单独取。"""
+    film = library_store.get_film(film_id)
+    if not film:
+        raise HTTPException(status_code=404, detail="剧集不存在")
+    if film.get("kind") != "series":
+        raise HTTPException(status_code=400, detail="这不是剧集条目")
+    seasons = library_store.series_seasons(film_id)
+    return {"seasons": seasons, "episodes": sum(entry["episodes"] for entry in seasons),
+            "progress": library_store.series_progress(film_id)}
+
+
+class LibraryProgressBody(BaseModel):
+    position: float = Field(default=0, ge=0)
+    duration: float = Field(default=0, ge=0)
+
+
+@app.put("/api/library/films/{film_id}/progress")
+def library_film_progress(film_id: str, body: LibraryProgressBody,
+                          _: dict = Depends(current_user)) -> dict:
+    """记录播放进度（电影与分集共用），跨设备共享。"""
+    try:
+        return {"progress": library_store.save_progress(film_id, body.position, body.duration)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/api/library/films/{film_id}/progress")
+def library_film_progress_clear(film_id: str, _: dict = Depends(current_user)) -> dict:
+    return {"ok": library_store.clear_progress(film_id)}
+
+
+@app.post("/api/library/films/{film_id}/refresh")
+def library_film_refresh(film_id: str, _: dict = Depends(current_user)) -> dict:
+    """剧集库的「刷新」：重新读取 tvshow.nfo 与分集 NFO（不联网）。"""
+    try:
+        film = library_store.refresh_series(film_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"film": film}
 
 
 @app.get("/api/library/films/{film_id}")
