@@ -37,10 +37,38 @@
       return 'cards';
     }
   };
+  const POSTER_SIZE_KEY = 'javsp-web.library-poster-size';
+  const POSTER_TIERS = [
+    { key: 'small', label: '小', size: 120 },
+    { key: 'medium', label: '中', size: 150 },
+    { key: 'large', label: '大', size: 190 },
+    { key: 'xlarge', label: '超大', size: 240 },
+  ];
+  const DEFAULT_POSTER_TIER = 'medium';
+  const posterTier = (key) => POSTER_TIERS.find((tier) => tier.key === key)
+    || POSTER_TIERS.find((tier) => tier.key === DEFAULT_POSTER_TIER);
+  const readPosterTier = () => {
+    try {
+      const raw = localStorage.getItem(POSTER_SIZE_KEY);
+      if (POSTER_TIERS.some((tier) => tier.key === raw)) return raw;
+      // 兼容上一版按像素保存的值：就近归入四档
+      const numeric = Number(raw);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        return POSTER_TIERS.reduce((best, tier) => (
+          Math.abs(tier.size - numeric) < Math.abs(best.size - numeric) ? tier : best
+        ), POSTER_TIERS[0]).key;
+      }
+    } catch (_) {
+      /* 隐私模式或旧数据：用默认档 */
+    }
+    return DEFAULT_POSTER_TIER;
+  };
   const state = {
     libraries: [], activeLibraryId: '', films: [], total: 0, stats: {}, offset: 0,
-    status: 'all', query: '', sort: 'updated', groupBy: '', group: null, groupMode: readGroupMode(), groups: [],
+    status: 'all', query: '', sort: 'updated', groupBy: '', group: null, groupMode: readGroupMode(), posterTier: readPosterTier(), groups: [],
     groupsVisible: GROUP_PAGE, librariesFresh: false, playingFilmId: '', previousFilmId: '', playerSwitching: false,
+    // 剧集库：点进某部剧后只看它的分集；季列表单独取（分集是分页的）
+    seriesFocus: '', seriesInfo: null, seasons: [], seasonFocus: 0, seriesProgress: null,
     allCount: 0, allCovers: [],
     loading: false, loaded: false, active: null, nfo: null, pollTimer: null, busy: false,
   };
@@ -89,6 +117,9 @@
 
   const activeLibrary = () => state.libraries.find((item) => item.id === state.activeLibraryId) || null;
   const folders = () => activeLibrary()?.folders || [];
+  /** 当前库类型：movie（一个目录一部片）/ series（底层目录一部剧） */
+  const activeKind = () => (activeLibrary()?.kind || 'movie');
+  const seriesMode = () => !libraryIsAll() && activeKind() === 'series';
 
   function folderLabel(folder) {
     const name = String(folder.name || '').trim();
@@ -325,7 +356,134 @@
     </article>`;
   }
 
+  // ------------------------------------------------------------------ 剧集库
+  const SEASON_LABEL = (season) => (Number(season) === 0 ? '特别篇' : `第 ${season} 季`);
+  const coverUrl = (film) => `/api/library/films/${encodeURIComponent(film.id)}/cover?v=${encodeURIComponent(film.updated_at || '')}`;
+  const episodeLabel = (film) => `S${String(film.season || 0).padStart(2, '0')}E${String(film.episode || 0).padStart(2, '0')}`;
+
+  /** 剧集卡片：海报 + 剧名 + N 季 M 集（剧集库不刮削，只反映有没有 NFO） */
+  function seriesCardMarkup(film) {
+    const cover = film.cover_path
+      ? `<img loading="lazy" alt="" src="${coverUrl(film)}" onerror="this.closest('.lib-cover').classList.add('lib-cover--empty');this.remove()">`
+      : '';
+    const counts = [film.season_count ? `${film.season_count} 季` : '',
+      film.episode_count ? `${film.episode_count} 集` : ''].filter(Boolean).join(' · ');
+    const badge = film.nfo_path ? { label: '有 NFO', tone: 'success' } : { label: '无 NFO', tone: 'neutral' };
+    return `<article class="lib-card" data-lib-film="${escape(film.id)}">
+      <div class="lib-cover-wrap">
+        <button class="lib-cover${cover ? '' : ' lib-cover--empty'}" type="button" data-lib-series="${escape(film.id)}" aria-label="打开 ${escape(film.title || '剧集')}">
+          ${cover}${cover ? '' : `<span class="lib-cover-text">${escape(film.title || '剧集')}</span>`}<span class="lib-badge" data-tone="${badge.tone}">${badge.label}</span>
+        </button>
+      </div>
+      <div class="lib-info">
+        <strong class="lib-id">${escape(film.title || '剧集')}</strong>
+        <small class="lib-meta">${escape(counts || '还没有分集')}</small>
+      </div>
+      <div class="lib-actions">
+        <button class="button small secondary" type="button" data-lib-refresh="${escape(film.id)}">刷新</button>
+        <button class="button small" type="button" data-lib-series="${escape(film.id)}">分集</button>
+      </div>
+    </article>`;
+  }
+
+  /** 分集卡片（Emby 风格）：16:9 剧照 + 集号角标 + 标题压图 + 观看进度条 */
+  function episodeRowMarkup(film) {
+    const still = film.cover_path
+      ? `<img loading="lazy" alt="" src="${coverUrl(film)}" onerror="this.closest('.lib-ep-thumb').classList.add('lib-cover--empty');this.remove()">`
+      : '';
+    const meta = [film.release_date, film.runtime ? `${film.runtime} 分钟` : ''].filter(Boolean).join(' · ');
+    const progress = film.progress || {};
+    const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+    const watched = Boolean(progress.finished);
+    const bar = !watched && percent > 0
+      ? `<span class="lib-ep-progress" style="width:${percent.toFixed(1)}%"></span>` : '';
+    // 只看角标：看完打勾，看了一部分就留一条进度条，不在卡片上写时间
+    const done = watched ? '<span class="lib-ep-done" title="已看">✓</span>' : '';
+    return `<article class="lib-ep-card" data-lib-film="${escape(film.id)}">
+      <button class="lib-ep-thumb${still ? '' : ' lib-cover--empty'}" type="button" data-lib-play="${escape(film.id)}" aria-label="播放 ${escape(episodeLabel(film))}">
+        ${still}
+        <span class="lib-ep-no">${film.episode || '—'}</span>
+        ${done}
+        <span class="lib-ep-name">${escape(film.title || episodeLabel(film))}</span>
+        ${bar}
+      </button>
+      <p class="lib-ep-meta">${escape(meta || episodeLabel(film))}</p>
+      ${film.plot ? `<p class="lib-ep-plot">${escape(film.plot)}</p>` : ''}
+    </article>`;
+  }
+
+  /** 剧集头部（Emby 版式）：大海报 + 标题/元信息/操作 + 简介 */
+  function seriesHeaderMarkup() {
+    const series = state.seriesInfo;
+    if (!series) return '';
+    const cover = series.cover_path ? `<img alt="" src="${coverUrl(series)}">` : '';
+    const seasonTotal = state.seasons.length;
+    const episodeTotal = state.seasons.reduce((sum, item) => sum + (item.episodes || 0), 0);
+    const counts = [seasonTotal ? `${seasonTotal} 季` : '', episodeTotal ? `${episodeTotal} 集` : '']
+      .filter(Boolean).join(' · ');
+    const progress = state.seriesProgress;
+    const watched = progress && progress.total
+      ? `已看 ${progress.watched}/${progress.total} 集` : '';
+    const meta = [series.release_date, series.studio, counts, watched, formatBytes(series.size_bytes)]
+      .filter((value) => value && value !== '—').join(' · ');
+    const resume = progress?.resume;
+    const first = (state.films || [])[0];
+    // 主按钮只写「播放」；看到哪一集交给分集卡片上的角标表示
+    const target = resume?.film_id || first?.id;
+    return `<div class="lib-hero">
+      <div class="lib-hero-poster${cover ? '' : ' lib-cover--empty'}">${cover}</div>
+      <div class="lib-hero-main">
+        <button class="lib-back" type="button" data-lib-series-back>← 返回剧集列表</button>
+        <h1 class="lib-hero-title">${escape(series.title || '剧集')}</h1>
+        ${meta ? `<p class="lib-hero-meta">${escape(meta)}</p>` : ''}
+        <div class="lib-hero-actions">
+          ${target ? `<button class="button primary" type="button" data-lib-play="${escape(target)}">▶ 播放</button>` : ''}
+          <button class="button secondary" type="button" data-lib-refresh="${escape(series.id)}">刷新 NFO</button>
+        </div>
+        ${series.plot ? `<p class="lib-hero-plot">${escape(series.plot)}</p>` : ''}
+      </div>
+    </div>`;
+  }
+
+  /** 演职员：tvshow.nfo 里的演员，没有就整块不显示 */
+  function castMarkup() {
+    const names = (state.seriesInfo?.actress || []).filter(Boolean);
+    if (!names.length) return '';
+    return `<section class="lib-cast">
+      <h2>演职员</h2>
+      <div class="lib-cast-list">${names.map((name) => `<div class="lib-cast-item">
+        <span class="lib-cast-avatar" aria-hidden="true">${escape(String(name).slice(0, 1))}</span>
+        <span class="lib-cast-name">${escape(name)}</span>
+      </div>`).join('')}</div>
+    </section>`;
+  }
+
+  /** 季标题 + 横向滚动的分集卡片 */
+  function episodesMarkup() {
+    if (!state.seasons.length) {
+      return '<p class="lib-empty">这部还没有分集。把视频放进剧集目录即可，文件名用 S01E01 / 第01集 / 01 都能识别。</p>';
+    }
+    const active = state.seasons.some((item) => Number(item.season) === Number(state.seasonFocus))
+      ? Number(state.seasonFocus) : Number(state.seasons[0].season);
+    const episodes = state.films
+      .filter((film) => Number(film.season) === active)
+      .sort((left, right) => (left.episode || 0) - (right.episode || 0));
+    const tabs = state.seasons.length > 1
+      ? `<div class="lib-tabs lib-season-tabs">${state.seasons.map((item) => `<button class="lib-tab${Number(item.season) === active ? ' active' : ''}" type="button" `
+        + `data-lib-season="${item.season}">${SEASON_LABEL(item.season)}<span>${item.episodes}</span></button>`).join('')}</div>`
+      : '';
+    return `<div class="lib-season-head"><h2>${SEASON_LABEL(active)}</h2>${tabs}</div>`
+      + `<div class="lib-strip-wrap">
+        <button class="lib-strip-nav lib-strip-nav--prev" type="button" data-lib-scroll="-1" aria-label="向前翻">‹</button>
+        <div class="lib-strip" id="library-episode-strip">${episodes.map(episodeRowMarkup).join('')
+          || '<p class="lib-empty">这一季还没有分集。</p>'}</div>
+        <button class="lib-strip-nav lib-strip-nav--next" type="button" data-lib-scroll="1" aria-label="向后翻">›</button>
+      </div>`
+      + castMarkup();
+  }
+
   function gridMarkup() {
+    if (seriesMode() && state.seriesFocus) return seriesHeaderMarkup() + episodesMarkup();
     if (!state.films.length) {
       if (!state.libraries.length) return '';
       if (libraryIsAll()) {
@@ -333,9 +491,34 @@
       }
       const library = activeLibrary();
       if (!library || !library.folders.length) return '<p class="lib-empty">这个媒体库还没有文件夹。点右上角“添加文件夹”把存放影片的目录加进来。</p>';
+      if (seriesMode()) {
+        return `<p class="lib-empty">${state.query ? '没有符合条件的剧集。'
+          : '这个媒体库还没有剧集。点「扫描」重新读取目录：放影片的最底层文件夹会被当作一部剧，'
+            + '里面的 S01 / 第一季 子目录当作季，文件名里的 S01E01 / 第01集 当作集。'}</p>`;
+      }
       return `<p class="lib-empty">${state.query || state.status !== 'all' ? '没有符合条件的影片。' : '这个媒体库的文件夹里还没有影片。点“扫描”重新读取目录。'}</p>`;
     }
+    if (seriesMode()) return state.films.map(seriesCardMarkup).join('');
     return state.films.map(cardMarkup).join('');
+  }
+
+  /** 四档海报大小：小 / 中 / 大 / 超大；持久化到本机浏览器 */
+  function applyPosterTier(key, persist = false) {
+    const tier = posterTier(key);
+    state.posterTier = tier.key;
+    const grid = el('library-grid');
+    if (grid && grid.style) grid.style.setProperty('--lib-card-size', `${tier.size}px`);
+    const buttons = document.querySelectorAll ? document.querySelectorAll('[data-poster-tier]') : [];
+    buttons.forEach((button) => {
+      button.setAttribute('aria-pressed', String(button.dataset.posterTier === tier.key));
+    });
+    if (persist) {
+      try {
+        localStorage.setItem(POSTER_SIZE_KEY, tier.key);
+      } catch (_) {
+        /* 隐私模式下忽略 */
+      }
+    }
   }
 
   function render() {
@@ -348,19 +531,24 @@
     if (body) body.hidden = !hasLibraries;
     const foldersTarget = el('library-folders');
     if (foldersTarget) foldersTarget.innerHTML = foldersMarkup();
+    const series = seriesMode();
     const stats = el('library-stats');
-    if (stats) stats.innerHTML = statsMarkup(state.stats || {});
+    if (stats) {
+      // 剧集库不联网刮削，状态筛选（资料完整/缺资料）对它有误导，直接隐藏
+      stats.innerHTML = series ? '' : statsMarkup(state.stats || {});
+      stats.hidden = series;
+    }
     const groups = el('library-groups');
     const drilled = state.group !== null;
-    const showCards = state.groupBy && !drilled && state.groupMode === 'cards';
+    const showCards = !series && state.groupBy && !drilled && state.groupMode === 'cards';
     if (groups) {
       groups.innerHTML = showCards ? groupCardsMarkup() : groupsMarkup();
       groups.classList.toggle('lib-groups--cards', showCards);
       // 点进某个分类后不再显示其它名字，只留下返回条和影片墙
-      groups.hidden = !state.groupBy || drilled;
+      groups.hidden = series || !state.groupBy || drilled;
     }
     const groupToolbar = el('library-group-toolbar');
-    if (groupToolbar) groupToolbar.hidden = !state.groupBy;
+    if (groupToolbar) groupToolbar.hidden = series || !state.groupBy;
     const nav = el('library-group-nav');
     if (nav) {
       nav.innerHTML = groupNavMarkup();
@@ -379,12 +567,16 @@
     if (grid) {
       grid.innerHTML = showCards ? '' : gridMarkup();
       grid.hidden = showCards;
+      // 剧集详情页要铺满整行：不能沿用海报墙的多列网格，否则头部和分集会被挤进 168px 的格子里
+      grid.classList.toggle('lib-grid--series', series && Boolean(state.seriesFocus));
     }
+    applyPosterTier(state.posterTier);
     const more = el('library-more');
     if (more) {
       const remaining = state.total - state.films.length;
+      const unit = series && state.seriesFocus ? '集' : '部';
       more.hidden = showCards || remaining <= 0;
-      more.textContent = remaining > 0 ? `加载更多（还有 ${remaining} 部）` : '加载更多';
+      more.textContent = remaining > 0 ? `加载更多（还有 ${remaining} ${unit}）` : '加载更多';
     }
     const scanButton = el('library-scan');
     if (scanButton) {
@@ -395,7 +587,9 @@
     }
     const batchButton = el('library-batch-scrape');
     if (batchButton) {
-      batchButton.disabled = !hasLibraries || !state.activeLibraryId || !state.total;
+      // 剧集库不联网刮削，批量刮削按钮没有意义
+      batchButton.hidden = series;
+      batchButton.disabled = series || !hasLibraries || !state.activeLibraryId || !state.total;
       batchButton.title = `把当前筛选的 ${state.total} 部影片加入刮削队列`;
     }
     const addFolder = el('library-add-folder');
@@ -452,6 +646,20 @@
     // 处于“全部影片”时照常请求，只是不带 library_id，由服务端汇总所有库
     const offset = append ? state.films.length : 0;
     const params = filterParams({ offset, limit });
+    if (seriesMode()) {
+      // 剧集库不按刮削状态筛选，也不需要分类
+      params.delete('status');
+      params.delete('group_by');
+      params.delete('group');
+      if (state.seriesFocus) {
+        params.set('parent', state.seriesFocus);
+        if (state.seasons.length) params.set('season', String(state.seasonFocus));
+        // 一季一次取完，几百集的剧也不会被分页截断
+        params.set('limit', String(Math.max(limit, 200)));
+      } else {
+        params.set('kind', 'series');
+      }
+    }
     const payload = await api(`/api/library/films?${params}`);
     const items = payload.items || [];
     state.total = payload.total || 0;
@@ -463,6 +671,70 @@
   function browsingGroups() {
     // 选了分类但还没点进具体某一项：主内容是分类，不需要影片墙
     return Boolean(state.groupBy) && state.group === null;
+  }
+
+  /** 取一部剧的季列表与观看进度：分集是分页的，季标签必须单独取 */
+  async function loadSeasons(seriesId) {
+    try {
+      const payload = await api(`/api/library/series/${encodeURIComponent(seriesId)}/seasons`);
+      state.seasons = payload.seasons || [];
+      state.seriesProgress = payload.progress || null;
+    } catch (error) {
+      state.seasons = [];
+      state.seriesProgress = null;
+    }
+    if (state.seasons.length
+        && !state.seasons.some((item) => Number(item.season) === Number(state.seasonFocus))) {
+      state.seasonFocus = Number(state.seasons[0].season);
+    }
+    return state.seasons;
+  }
+
+  /** 进入某部剧：先取季列表，再加载当前季的分集 */
+  async function openSeries(filmId) {
+    const film = state.films.find((item) => item.id === filmId) || null;
+    state.seriesFocus = filmId;
+    state.seriesInfo = film;
+    state.seasons = [];
+    state.seasonFocus = 0;
+    state.offset = 0;
+    if (!state.seriesInfo) {
+      try {
+        state.seriesInfo = (await api(`/api/library/films/${encodeURIComponent(filmId)}`)).film || null;
+      } catch (error) {
+        state.seriesInfo = null;
+      }
+    }
+    await loadSeasons(filmId);
+    await loadFilms();
+    render();
+  }
+
+  /** 切换季：只重取这一季的分集 */
+  async function focusSeason(season) {
+    state.seasonFocus = Number(season) || 0;
+    state.offset = 0;
+    await loadFilms();
+    render();
+  }
+
+  async function refreshSeries(filmId) {
+    try {
+      message('正在读取 NFO…');
+      await api(`/api/library/films/${encodeURIComponent(filmId)}/refresh`, { method: 'POST' });
+      message('');
+      if (state.seriesFocus === filmId) {
+        await loadSeasons(filmId);
+        await loadFilms();
+        render();
+      } else {
+        await refresh();
+      }
+      showToast('已按 NFO 刷新');
+    } catch (error) {
+      message('');
+      showToast(error.message || '刷新失败', 'danger');
+    }
   }
 
   async function load({ keepGroup = false, refreshLibraries = true } = {}) {
@@ -492,6 +764,8 @@
       if (browsingGroups()) {
         state.films = [];
       } else {
+        // 停在某部剧里时，扫描后季的数量可能变了，季标签也要跟着刷新
+        if (seriesMode() && state.seriesFocus) await loadSeasons(state.seriesFocus);
         await loadFilms({ limit: Math.min(200, Math.max(LIMIT, state.films.length)) });
       }
       render();
@@ -507,6 +781,10 @@
     state.query = '';
     state.group = null;
     state.offset = 0;
+    state.seriesFocus = '';
+    state.seriesInfo = null;
+    state.seasons = [];
+    state.seasonFocus = 0;
     const search = el('library-page-search');
     if (search) search.value = '';
     message('');
@@ -631,19 +909,39 @@
     }
   }
 
+  const CREATE_HINT = {
+    movie: '扫描只读取目录、NFO 与图片，不会移动文件，也不会创建刮削任务；小于预设“最小匹配文件大小”的文件会被忽略。',
+    series: '剧集库把放影片的最底层文件夹当作一部剧，里面的 S01 / 第一季 子目录当作季，'
+      + '文件名里的 S01E01 / 第01集 / 01 当作集；识别顺序是 NFO > 目录名 > 文件名，不联网刮削。',
+  };
+
+  function syncCreateHint() {
+    const kind = el('library-create-kind')?.value || 'movie';
+    const hint = el('library-create-hint');
+    if (hint) hint.textContent = CREATE_HINT[kind] || CREATE_HINT.movie;
+  }
+
   function openCreateDialog() {
     const dialog = el('library-create-dialog');
     if (!dialog) return;
     el('library-create-name').value = '';
     el('library-create-path').value = '';
     el('library-create-message').textContent = '';
+    const kindSelect = el('library-create-kind');
+    if (kindSelect) kindSelect.value = 'movie';
     fillPresets(el('library-create-preset'));
+    syncCreateHint();
     dialog.showModal();
   }
+
+  document.addEventListener('change', (event) => {
+    if (event.target.id === 'library-create-kind') syncCreateHint();
+  });
 
   async function createLibrary() {
     const name = String(el('library-create-name')?.value || '').trim();
     const path = String(el('library-create-path')?.value || '').trim();
+    const kind = el('library-create-kind')?.value || 'movie';
     const preset = el('library-create-preset')?.value || 'default';
     const recursive = el('library-create-recursive')?.checked !== false;
     const target = el('library-create-message');
@@ -657,6 +955,7 @@
         method: 'POST',
         body: JSON.stringify({
           name,
+          kind,
           preset_id: preset,
           folders: path ? [{ path, recursive }] : [],
           scan: Boolean(path),
@@ -668,6 +967,9 @@
       state.query = '';
       state.group = null;
       state.offset = 0;
+      state.seriesFocus = '';
+      state.seriesInfo = null;
+      state.seasons = [];
       if (payload.scan?.id) await pollScan(payload.scan.id);
       await load({ keepGroup: false });
       showToast('媒体库已创建');
@@ -743,6 +1045,8 @@
     fillPresets(el('library-settings-preset'));
     const select = el('library-settings-preset');
     if (select) select.value = library.preset_id;
+    const kindSelect = el('library-settings-kind');
+    if (kindSelect) kindSelect.value = library.kind || 'movie';
     el('library-settings-dialog')?.showModal();
   }
 
@@ -751,13 +1055,19 @@
     if (!library) return;
     const name = String(el('library-settings-name')?.value || '').trim();
     const preset = el('library-settings-preset')?.value || 'default';
+    const kind = el('library-settings-kind')?.value || library.kind || 'movie';
+    const kindChanged = kind !== (library.kind || 'movie');
     const target = el('library-settings-message');
     try {
       await api(`/api/library/libraries/${encodeURIComponent(library.id)}`,
-        { method: 'PUT', body: JSON.stringify({ name, preset_id: preset }) });
+        { method: 'PUT', body: JSON.stringify({ name, preset_id: preset, kind }) });
       el('library-settings-dialog')?.close();
+      state.seriesFocus = '';
+      state.seriesInfo = null;
+      state.seasons = [];
+      state.seasonFocus = 0;
       await refresh();
-      showToast('设置已保存');
+      showToast(kindChanged ? '类型已修改，点「扫描」按新类型重建索引' : '设置已保存');
     } catch (error) {
       if (target) target.textContent = error.message || '保存失败';
     }
@@ -816,7 +1126,14 @@
     }, 6000);
   }
 
+  function filmById(filmId) {
+    return (state.films || []).find((item) => item.id === filmId) || null;
+  }
+
   function readPlaybackPosition(filmId) {
+    // 服务端进度优先（跨设备共享），没有再用本机 localStorage 兜底
+    const server = Number(filmById(filmId)?.progress?.position);
+    if (Number.isFinite(server) && server > 0) return server;
     try {
       const value = Number(localStorage.getItem(playbackKey(filmId)));
       return Number.isFinite(value) && value > 0 ? value : 0;
@@ -832,6 +1149,42 @@
     } catch (error) {
       /* 隐私模式下忽略 */
     }
+  }
+
+  /** 把进度写到服务端：默认 10 秒最多一次，暂停/关闭时强制写（keepalive 保证关页面也能发出去） */
+  let progressReportedAt = 0;
+  let progressReportedFilm = '';
+  function reportProgress(filmId, position, duration, { force = false } = {}) {
+    if (!filmId || !Number.isFinite(position) || position < 1) return;
+    const now = Date.now();
+    if (!force && filmId === progressReportedFilm && now - progressReportedAt < 10000) return;
+    progressReportedFilm = filmId;
+    progressReportedAt = now;
+    const options = {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ position: Math.floor(position), duration: Math.floor(Number(duration) || 0) }),
+    };
+    if (force) options.keepalive = true;
+    fetch(`/api/library/films/${encodeURIComponent(filmId)}/progress`, options)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (!data?.progress) return;
+        const film = filmById(filmId);
+        if (film) film.progress = data.progress;
+      })
+      .catch(() => {});
+  }
+
+  /** 关闭播放器后刷新「已看 N/M 集」与继续观看按钮 */
+  function refreshSeriesProgress() {
+    if (!seriesMode() || !state.seriesFocus) return;
+    api(`/api/library/series/${encodeURIComponent(state.seriesFocus)}/seasons`)
+      .then((payload) => {
+        state.seriesProgress = payload.progress || null;
+        render();
+      })
+      .catch(() => {});
   }
 
   function clearPlaybackPosition(filmId) {
@@ -909,6 +1262,7 @@
     const current = playerVideo();
     if (state.playingFilmId && current && Number.isFinite(current.currentTime)) {
       savePlaybackPosition(state.playingFilmId, current.currentTime);
+      reportProgress(state.playingFilmId, current.currentTime, current.duration, { force: true });
     }
     notifyPlaybackStopped(playerPayload);
     if (player) {
@@ -933,6 +1287,8 @@
     state.playingFilmId = '';
     playerPayload = null;
     window.clearInterval(playerTimer);
+    // 关掉播放器后回读一次整部剧的观看情况，卡片上的进度条和「继续观看」才能对上
+    if (!keepDialog) setTimeout(refreshSeriesProgress, 400);
   }
 
   function ensureArtPlayer() {
@@ -983,7 +1339,16 @@
         savePlaybackPosition(state.playingFilmId, player.currentTime);
       });
       player.on('video:ended', () => {
-        if (state.playingFilmId) clearPlaybackPosition(state.playingFilmId);
+        if (!state.playingFilmId) return;
+        clearPlaybackPosition(state.playingFilmId);
+        // 播完把进度写成片尾，服务端据此标记「已看」
+        const total = Number(player?.duration) || 0;
+        reportProgress(state.playingFilmId, total, total, { force: true });
+      });
+      player.on('video:pause', () => {
+        if (!state.playingFilmId || !player) return;
+        savePlaybackPosition(state.playingFilmId, player.currentTime);
+        reportProgress(state.playingFilmId, player.currentTime, player.duration, { force: true });
       });
       player.on('video:error', () => {
         handlePlaybackError('ArtPlayer');
@@ -1114,6 +1479,7 @@
         const current = playerVideo();
         if (state.playingFilmId && current && current.currentTime > 0) {
           savePlaybackPosition(state.playingFilmId, current.currentTime);
+          reportProgress(state.playingFilmId, current.currentTime, current.duration);
         }
       }, 5000);
     } catch (error) {
@@ -1439,6 +1805,12 @@
       destroyPlayer();
       return;
     }
+    const posterTierButton = event.target.closest('[data-poster-tier]');
+    if (posterTierButton) {
+      event.preventDefault();
+      applyPosterTier(posterTierButton.dataset.posterTier, true);
+      return;
+    }
     if (event.target.closest('#library-scan')) {
       scan();
       return;
@@ -1484,6 +1856,44 @@
       state.groupMode = state.groupMode === 'cards' ? 'chips' : 'cards';
       try { localStorage.setItem(GROUP_MODE_KEY, state.groupMode); } catch (_) {}
       render();
+      return;
+    }
+    const openSeriesCard = event.target.closest('[data-lib-series]');
+    if (openSeriesCard) {
+      event.preventDefault();
+      openSeries(openSeriesCard.dataset.libSeries).catch((error) => message(error.message));
+      return;
+    }
+    if (event.target.closest('[data-lib-series-back]')) {
+      event.preventDefault();
+      state.seriesFocus = '';
+      state.seriesInfo = null;
+      state.seasons = [];
+      state.seasonFocus = 0;
+      state.offset = 0;
+      refresh();
+      return;
+    }
+    const seasonTab = event.target.closest('[data-lib-season]');
+    if (seasonTab) {
+      event.preventDefault();
+      focusSeason(seasonTab.dataset.libSeason).catch((error) => message(error.message));
+      return;
+    }
+    const scrollButton = event.target.closest('[data-lib-scroll]');
+    if (scrollButton) {
+      event.preventDefault();
+      const strip = el('library-episode-strip');
+      if (strip && typeof strip.scrollBy === 'function') {
+        const direction = Number(scrollButton.dataset.libScroll) || 1;
+        strip.scrollBy({ left: direction * Math.max(280, (strip.clientWidth || 0) * 0.85), behavior: 'smooth' });
+      }
+      return;
+    }
+    const refreshTarget = event.target.closest('[data-lib-refresh]');
+    if (refreshTarget) {
+      event.preventDefault();
+      refreshSeries(refreshTarget.dataset.libRefresh);
       return;
     }
     const open = event.target.closest('[data-lib-open]');
@@ -1542,6 +1952,7 @@
   });
 
   bindPlayerLifecycle();
+  applyPosterTier(state.posterTier);
 
   document.addEventListener('change', (event) => {
     if (event.target.id === 'library-sort') {
@@ -1593,7 +2004,13 @@
     selectLibrary,
     batchScrape,
     // 纯函数，供离线测试使用
-    internals: { cardMarkup, statsMarkup, filterParams, detailMarkup, state, toneFor, tabsMarkup, foldersMarkup, groupCardsMarkup, groupCoverMarkup },
+    internals: {
+      cardMarkup, statsMarkup, filterParams, detailMarkup, state, toneFor, tabsMarkup, foldersMarkup,
+      groupCardsMarkup, groupCoverMarkup, applyPosterTier,
+      // 剧集库：卡片、剧集头部、季标签 + 分集行
+      seriesCardMarkup, seriesHeaderMarkup, episodesMarkup, episodeRowMarkup, render, gridMarkup,
+      activeKind, seriesMode, SEASON_LABEL, episodeLabel,
+    },
 
   };
 

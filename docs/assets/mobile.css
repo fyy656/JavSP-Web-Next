@@ -1,0 +1,78 @@
+/* Android 客户端：只保留媒体库、刮削与播放。普通浏览器不加载这些规则。 */
+html[data-mobile-app="1"] body { overflow-x: hidden; }
+html[data-mobile-app="1"] .sidebar { display: none !important; }
+html[data-mobile-app="1"] .app-shell,
+html[data-mobile-app="1"] .app-shell.sidebar-collapsed { display: block !important; min-width: 0; }
+html[data-mobile-app="1"] .main {
+  width: 100%;
+  max-width: none;
+  padding: 8px 10px calc(20px + env(safe-area-inset-bottom));
+}
+html[data-mobile-app="1"] .topbar { display: none !important; }
+html[data-mobile-app="1"] .view[data-panel]:not([data-panel="library"]) { display: none !important; }
+/* 兼容尚未内置移动模式的服务端：注入样式后直接露出媒体库面板 */
+html[data-mobile-app="1"] [data-panel="library"] { display: block !important; }
+
+/* 库标签横向滚动，避免窄屏折成多行 */
+html[data-mobile-app="1"] .lib-tabs {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+html[data-mobile-app="1"] .lib-tabs::-webkit-scrollbar { display: none; }
+html[data-mobile-app="1"] .lib-tab { flex: 0 0 auto; }
+
+/* 工具条：保留搜索、分类、批量刮削与扫描；隐藏排序、隐私、库设置等 */
+html[data-mobile-app="1"] .lib-toolbar { margin-bottom: 10px; gap: 8px; }
+html[data-mobile-app="1"] .lib-toolbar-main,
+html[data-mobile-app="1"] .lib-toolbar-actions { width: 100%; gap: 8px; }
+html[data-mobile-app="1"] .lib-search { flex: 1 1 100%; }
+html[data-mobile-app="1"] .lib-search input { flex: 1 1 auto; width: auto; min-width: 0; }
+html[data-mobile-app="1"] .lib-search button {
+  flex: 0 0 auto;
+  width: auto;
+  margin-top: 0;
+  white-space: nowrap;
+}
+html[data-mobile-app="1"] .lib-poster-size-options button { padding: 5px 6px; }
+html[data-mobile-app="1"] #library-sort-label,
+html[data-mobile-app="1"] .lib-toolbar-actions .switch-label,
+html[data-mobile-app="1"] #library-add-folder,
+html[data-mobile-app="1"] #library-settings,
+html[data-mobile-app="1"] .lib-group-toolbar,
+html[data-mobile-app="1"] .lib-folder-remove,
+html[data-mobile-app="1"] .lib-nfo { display: none !important; }
+
+/* 详情：单列字段，海报缩小 */
+html[data-mobile-app="1"] .lib-detail-head { grid-template-columns: 82px minmax(0, 1fr); gap: 10px; }
+html[data-mobile-app="1"] .lib-fields { grid-template-columns: 1fr; }
+html[data-mobile-app="1"] .library-film-dialog {
+  width: calc(100vw - 8px);
+  max-height: calc(100vh - 8px);
+  max-height: calc(100dvh - 8px);
+}
+
+/* 播放器：占满手机屏幕，交由 ArtPlayer 处理横屏与全屏 */
+html[data-mobile-app="1"] .lib-player-dialog {
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+}
+html[data-mobile-app="1"] .lib-player-scope {
+  height: 100vh;
+  height: 100dvh;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+html[data-mobile-app="1"] .lib-player-box,
+html[data-mobile-app="1"] .lib-player-video {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  aspect-ratio: auto;
+}

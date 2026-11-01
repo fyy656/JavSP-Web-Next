@@ -21,6 +21,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 
+from . import series_scan
 from .storage import DATA_DIR, VENDOR_DIR, read_config
 from .timeutils import now_iso
 
@@ -66,6 +67,16 @@ def connection():
         db.close()
 
 
+def ensure_ready() -> None:
+    """启动时先把 schema 迁移跑完。
+
+    老库第一次打开要补列（kind / parent_id / season / episode），如果拖到用户点「扫描」
+    时才做，扫描线程会和迁移抢同一把写锁，偶发 "attempt to write a readonly database"。
+    """
+    with connection():
+        pass
+
+
 def _ensure_schema(db) -> None:
     key = str(LIBRARY_DB_FILE.resolve())
     if key in _ready:
@@ -74,6 +85,7 @@ def _ensure_schema(db) -> None:
     db.executescript("""
     CREATE TABLE IF NOT EXISTS libraries (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, preset_id TEXT NOT NULL DEFAULT 'default',
+        kind TEXT NOT NULL DEFAULT 'movie',
         created_at TEXT NOT NULL, last_scan_at TEXT, scan_status TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS roots (
@@ -90,6 +102,10 @@ def _ensure_schema(db) -> None:
     CREATE TABLE IF NOT EXISTS films (
         id TEXT PRIMARY KEY,
         root_id TEXT NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL DEFAULT 'movie',
+        parent_id TEXT NOT NULL DEFAULT '',
+        season INTEGER NOT NULL DEFAULT 0,
+        episode INTEGER NOT NULL DEFAULT 0,
         dir_path TEXT NOT NULL, video_path TEXT NOT NULL, files TEXT NOT NULL DEFAULT '[]',
         size_bytes INTEGER NOT NULL DEFAULT 0, mtime REAL NOT NULL DEFAULT 0,
         dvdid TEXT NOT NULL DEFAULT '', dvdid_source TEXT NOT NULL DEFAULT '',
@@ -110,6 +126,13 @@ def _ensure_schema(db) -> None:
         name TEXT NOT NULL, ord INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (film_id, name)
     );
+    CREATE TABLE IF NOT EXISTS film_progress (
+        film_id TEXT PRIMARY KEY REFERENCES films(id) ON DELETE CASCADE,
+        position REAL NOT NULL DEFAULT 0,
+        duration REAL NOT NULL DEFAULT 0,
+        finished INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS scans (
         id TEXT PRIMARY KEY, root_id TEXT NOT NULL, status TEXT NOT NULL,
         discovered INTEGER NOT NULL DEFAULT 0, added INTEGER NOT NULL DEFAULT 0,
@@ -126,6 +149,8 @@ def _ensure_schema(db) -> None:
     _ensure_scan_library_column(db)
     _ensure_scan_skipped_column(db)
     _ensure_film_detached_column(db)
+    _ensure_library_kind_column(db)
+    _ensure_film_series_columns(db)
     _migrate_legacy_roots(db)
     _ready.add(key)
 
@@ -153,6 +178,33 @@ def _ensure_film_detached_column(db) -> None:
     if 'detached' in _table_columns(db, 'films'):
         return
     db.execute('ALTER TABLE films ADD COLUMN detached INTEGER NOT NULL DEFAULT 0')
+
+
+def _ensure_library_kind_column(db) -> None:
+    """媒体库类型：movie（一个目录一部片）/ series（底层目录一部剧，按季集拆分）。"""
+    if 'kind' not in _table_columns(db, 'libraries'):
+        db.execute("ALTER TABLE libraries ADD COLUMN kind TEXT NOT NULL DEFAULT 'movie'")
+    # 早期版本写过 'adult' 之类的值，统一归一到 movie（读取时也会归一，这里顺手把库里的值理顺）
+    db.execute("UPDATE libraries SET kind='movie' WHERE kind NOT IN ('movie','series')")
+    db.commit()
+
+
+def _ensure_film_series_columns(db) -> None:
+    """剧集库需要的列：条目类型、所属剧集、季、集。老库补列，默认值等于“普通影片”。
+
+    注意：`films_parent` 索引必须等列补齐之后再建，否则老库（还没有 parent_id 列）
+    会在建索引这一步直接报 "no such column"，整个媒体库都打不开。
+    """
+    columns = _table_columns(db, 'films')
+    for name, ddl in (('kind', "TEXT NOT NULL DEFAULT 'movie'"),
+                      ('parent_id', "TEXT NOT NULL DEFAULT ''"),
+                      ('season', 'INTEGER NOT NULL DEFAULT 0'),
+                      ('episode', 'INTEGER NOT NULL DEFAULT 0')):
+        if name in columns:
+            continue
+        db.execute(f'ALTER TABLE films ADD COLUMN {name} {ddl}')
+    db.execute('CREATE INDEX IF NOT EXISTS films_parent ON films(parent_id, season, episode)')
+    db.commit()
 
 
 def _migrate_legacy_roots(db) -> None:
@@ -218,7 +270,16 @@ def _scanner_config():
     return value
 
 
+# 剧集不套用电影的「最小匹配文件大小」：一集几十 MB 很常见，电影级阈值会把整部剧过滤光
+SERIES_MIN_SIZE = 1 << 20  # 1 MiB，只挡掉明显是垃圾的文件
+
 _preset_scanner_cache: dict[str, tuple[dict, int]] = {}
+
+
+def invalidate_preset_cache() -> None:
+    """预设改了最小文件大小/分片规则后，下一次扫描必须重新读取。"""
+    with _lock:
+        _preset_scanner_cache.clear()
 
 
 def preset_scan_limits(preset_id: str) -> tuple[dict, int]:
@@ -301,10 +362,19 @@ def _film_id(root_id: str, dir_path: str, part_key: str) -> str:
 
 
 def _root_rows(db, library_id: str) -> list[sqlite3.Row]:
+    # 分集不算「条目」：剧集库的 film_count 是剧的数量
     return db.execute(
-        """SELECT r.*, (SELECT count(*) FROM films f WHERE f.root_id=r.id) AS film_count
+        """SELECT r.*, (SELECT count(*) FROM films f WHERE f.root_id=r.id AND f.kind<>'episode') AS film_count
            FROM roots r JOIN library_roots lr ON lr.root_id=r.id
            WHERE lr.library_id=? ORDER BY lr.added_at, r.path""", (library_id,)).fetchall()
+
+
+LIBRARY_KINDS = ('movie', 'series')
+
+
+def _normalize_kind(value) -> str:
+    text = str(value or '').strip().lower()
+    return text if text in LIBRARY_KINDS else 'movie'
 
 
 def _library_from_row(db, row: sqlite3.Row) -> dict:
@@ -312,8 +382,9 @@ def _library_from_row(db, row: sqlite3.Row) -> dict:
                 'recursive': bool(item['recursive']), 'film_count': item['film_count'],
                 'last_scan_at': item['last_scan_at'], 'scan_status': item['scan_status']}
                for item in _root_rows(db, row['id'])]
+    kind = _normalize_kind(row['kind'] if 'kind' in row.keys() else 'movie')
     return {
-        'id': row['id'], 'name': row['name'], 'preset_id': row['preset_id'],
+        'id': row['id'], 'name': row['name'], 'preset_id': row['preset_id'], 'kind': kind,
         'created_at': row['created_at'], 'last_scan_at': row['last_scan_at'],
         'scan_status': row['scan_status'], 'folders': folders,
         'film_count': sum(item['film_count'] for item in folders),
@@ -334,7 +405,8 @@ def get_library(library_id: str) -> dict | None:
         return _library_from_row(db, row) if row else None
 
 
-def add_library(name: str, preset_id: str = 'default', folders: list | None = None) -> dict:
+def add_library(name: str, preset_id: str = 'default', folders: list | None = None,
+                kind: str = 'movie') -> dict:
     clean_name = str(name or '').strip()[:80]
     if not clean_name:
         raise ValueError('请填写媒体库名称')
@@ -343,14 +415,15 @@ def add_library(name: str, preset_id: str = 'default', folders: list | None = No
         if duplicate:
             raise ValueError('已有同名媒体库')
         library_id = uuid.uuid4().hex[:12]
-        db.execute('INSERT INTO libraries(id,name,preset_id,created_at) VALUES(?,?,?,?)',
-                   (library_id, clean_name, preset_id or 'default', now_iso()))
+        db.execute('INSERT INTO libraries(id,name,preset_id,kind,created_at) VALUES(?,?,?,?,?)',
+                   (library_id, clean_name, preset_id or 'default', _normalize_kind(kind), now_iso()))
     for folder in folders or []:
         add_folder(library_id, folder.get('path') or '', bool(folder.get('recursive', True)))
     return get_library(library_id)
 
 
-def update_library(library_id: str, *, name: str | None = None, preset_id: str | None = None) -> dict | None:
+def update_library(library_id: str, *, name: str | None = None, preset_id: str | None = None,
+                   kind: str | None = None) -> dict | None:
     fields, params = [], []
     if name is not None:
         clean_name = name.strip()[:80]
@@ -361,6 +434,9 @@ def update_library(library_id: str, *, name: str | None = None, preset_id: str |
     if preset_id is not None:
         fields.append('preset_id=?')
         params.append(preset_id or 'default')
+    if kind is not None:
+        fields.append('kind=?')
+        params.append(_normalize_kind(kind))
     if fields:
         with connection() as db:
             db.execute('UPDATE libraries SET ' + ','.join(fields) + ' WHERE id=?', [*params, library_id])
@@ -657,17 +733,144 @@ def _record_for_files(root: dict, directory: Path, files: list[Path], single_gro
     }
 
 
+def _series_record(root: dict, series_dir: Path, entries: list[dict]) -> dict:
+    """一个剧集目录 → series 条目。它本身没有视频，播放的是它的分集。"""
+    show_nfo = series_dir / 'tvshow.nfo'
+    meta = series_scan.parse_tvshow_nfo(show_nfo) if show_nfo.is_file() else {}
+    title = str(meta.get('title') or '') or series_scan.clean_series_title(series_dir.name) or series_dir.name
+    cover = series_scan.find_poster(series_dir)
+    if not cover:
+        poster = str(meta.get('poster_path') or '')
+        cover = poster if poster and not poster.startswith(('http://', 'https://')) else ''
+    size = 0
+    mtime = 0.0
+    for entry in entries:
+        try:
+            stat = entry['video'].stat()
+            size += stat.st_size
+            mtime = max(mtime, stat.st_mtime)
+        except OSError:
+            continue
+    actors = [item['name'] for item in meta.get('actors') or []]
+    if title and cover:
+        status = 'complete'
+    elif title or cover or meta:
+        status = 'partial'
+    else:
+        status = 'unscraped'
+    return {
+        'id': _film_id(root['id'], str(series_dir), 'series'),
+        'root_id': root['id'], 'kind': 'series', 'parent_id': '', 'season': 0, 'episode': 0,
+        'dir_path': str(series_dir), 'video_path': '',
+        'files': [str(entry['video']) for entry in entries],
+        'size_bytes': size, 'mtime': mtime,
+        'dvdid': '', 'dvdid_source': '',
+        'title': title,
+        'original_title': str(meta.get('original_title') or ''),
+        'plot': str(meta.get('plot') or ''),
+        'release_date': str(meta.get('premiered') or meta.get('year') or ''),
+        'studio': str(meta.get('studio') or ''), 'publisher': '', 'director': '',
+        'runtime': 0,
+        'actress': actors, 'actress_text': '、'.join(actors),
+        'nfo_path': str(show_nfo) if meta else '',
+        'nfo_mtime': show_nfo.stat().st_mtime if meta and show_nfo.exists() else 0,
+        'cover_path': cover,
+        'fanart_count': 1 if series_scan.find_fanart(series_dir) else 0,
+        'extrafanart_dir': '',
+        'status': status, 'missing_fields': [], 'nfo_error': '',
+    }
+
+
+def _episode_record(root: dict, series_record: dict, entry: dict) -> dict:
+    """一集 → episode 条目（季集号、剧照、NFO 资料都来自本地）。"""
+    video: Path = entry['video']
+    meta = entry.get('meta') or {}
+    nfo = entry.get('nfo')
+    title = str(meta.get('title') or '') or video.stem
+    thumb = str(meta.get('thumb_path') or '') or series_scan.find_thumb(video)
+    size = 0
+    mtime = 0.0
+    try:
+        stat = video.stat()
+        size, mtime = stat.st_size, stat.st_mtime
+    except OSError:
+        pass
+    actors = [item['name'] for item in meta.get('actors') or []]
+    if meta.get('title') and thumb:
+        status = 'complete'
+    elif title or meta:
+        status = 'partial'
+    else:
+        status = 'unscraped'
+    return {
+        'id': _film_id(root['id'], str(video), 'episode'),
+        'root_id': root['id'], 'kind': 'episode', 'parent_id': series_record['id'],
+        'season': int(entry.get('season') or 0), 'episode': int(entry.get('episode') or 0),
+        'dir_path': str(video.parent), 'video_path': str(video), 'files': [str(video)],
+        'size_bytes': size, 'mtime': mtime,
+        'dvdid': '', 'dvdid_source': '',
+        'title': title,
+        'original_title': '',
+        'plot': str(meta.get('plot') or ''),
+        'release_date': str(meta.get('premiered') or ''),
+        'studio': str(meta.get('studio') or ''),
+        'publisher': '',
+        'director': '、'.join(meta.get('directors') or []),
+        'runtime': int(meta.get('runtime') or 0),
+        'actress': actors, 'actress_text': '、'.join(actors),
+        'nfo_path': str(nfo) if nfo else '',
+        'nfo_mtime': nfo.stat().st_mtime if nfo and nfo.exists() else 0,
+        'cover_path': thumb,
+        'fanart_count': 0,
+        'extrafanart_dir': '',
+        'status': status, 'missing_fields': [], 'nfo_error': '',
+    }
+
+
+def _series_records_for(root: dict, series_dir: Path, scanner: dict, minimum: int) -> tuple[list[dict], int]:
+    """单个剧集目录 → [series, episode...]。刷新单部剧时复用。
+
+    剧集的最小文件大小取 `min(预设, SERIES_MIN_SIZE)`：预设的阈值是按整部影片定的
+    （默认 232MiB），而一集短剧/番剧只有几十 MB，直接套上去会把整部剧过滤光。
+    """
+    extensions = _video_extensions()
+    limit = min(int(minimum or 0), SERIES_MIN_SIZE)
+    entries = []
+    skipped = 0
+    for entry in series_scan.episode_entries(series_dir, extensions):
+        if _passes_size(entry['video'], limit, scanner):
+            entries.append(entry)
+        else:
+            skipped += 1
+    series_record = _series_record(root, series_dir, entries)
+    records = [series_record, *(_episode_record(root, series_record, entry) for entry in entries)]
+    return records, skipped
+
+
+def _series_records(root: dict, scanner: dict, minimum: int) -> tuple[list[dict], int]:
+    """把一个剧集库文件夹展开成 series + episode 记录。"""
+    extensions = _video_extensions()
+    records: list[dict] = []
+    skipped = 0
+    for series_dir in series_scan.series_dirs(Path(root['path']), extensions):
+        part, part_skipped = _series_records_for(root, series_dir, scanner, minimum)
+        records.extend(part)
+        skipped += part_skipped
+    return records, skipped
+
+
 def _write_film(db, record: dict, existing: sqlite3.Row | None, preserve_manual: bool = True,
                 detached: int = 0) -> bool:
+    kind = str(record.get('kind') or 'movie')
     if existing is not None:
-        if preserve_manual and existing['dvdid_source'] == 'manual':
+        if preserve_manual and kind == 'movie' and existing['dvdid_source'] == 'manual':
             if record.get('dvdid') and record['dvdid'].casefold() == existing['dvdid'].casefold():
                 record['dvdid_source'] = 'nfo'
             else:
                 record['dvdid'] = existing['dvdid']
                 record['dvdid_source'] = 'manual'
         # NFO 被 Emby/Jellyfin 改写成只剩标题的 stub 时，别让一次重扫把已经刮好的资料冲掉
-        if not record.get('title') and existing['title']:
+        if kind == 'movie' and not record.get('title') and existing['title']:
             record['title'] = existing['title']
             for field in ('original_title', 'plot', 'release_date', 'studio', 'publisher', 'director'):
                 if not record.get(field):
@@ -691,18 +894,27 @@ def _write_film(db, record: dict, existing: sqlite3.Row | None, preserve_manual:
     record.setdefault('scrape_state', 'idle')
     record.setdefault('last_task_id', '')
     record.setdefault('last_error', '')
+    record['kind'] = kind
+    record.setdefault('parent_id', '')
+    record.setdefault('season', 0)
+    record.setdefault('episode', 0)
     record['detached'] = detached
     record['updated_at'] = now_iso()
     changed = existing is None or any(existing[key] != record.get(key) for key in (
-        'video_path', 'dvdid', 'title', 'status', 'cover_path', 'nfo_path', 'nfo_mtime', 'mtime'))
-    db.execute("""INSERT INTO films(id,root_id,dir_path,video_path,files,size_bytes,mtime,dvdid,dvdid_source,
+        'video_path', 'dvdid', 'title', 'status', 'cover_path', 'nfo_path', 'nfo_mtime', 'mtime',
+        'kind', 'parent_id', 'season', 'episode'))
+    db.execute("""INSERT INTO films(id,root_id,kind,parent_id,season,episode,dir_path,video_path,files,
+        size_bytes,mtime,dvdid,dvdid_source,
         title,original_title,plot,release_date,studio,publisher,director,runtime,actress_text,nfo_path,nfo_mtime,
         cover_path,fanart_count,extrafanart_dir,status,missing_fields,scrape_state,last_task_id,last_error,detached,updated_at)
-        VALUES(:id,:root_id,:dir_path,:video_path,:files,:size_bytes,:mtime,:dvdid,:dvdid_source,:title,
+        VALUES(:id,:root_id,:kind,:parent_id,:season,:episode,:dir_path,:video_path,:files,
+        :size_bytes,:mtime,:dvdid,:dvdid_source,:title,
         :original_title,:plot,:release_date,:studio,:publisher,:director,:runtime,:actress_text,:nfo_path,
         :nfo_mtime,:cover_path,:fanart_count,:extrafanart_dir,:status,:missing_fields,:scrape_state,
         :last_task_id,:last_error,:detached,:updated_at)
-        ON CONFLICT(id) DO UPDATE SET root_id=excluded.root_id,dir_path=excluded.dir_path,
+        ON CONFLICT(id) DO UPDATE SET root_id=excluded.root_id,kind=excluded.kind,
+        parent_id=excluded.parent_id,season=excluded.season,episode=excluded.episode,
+        dir_path=excluded.dir_path,
         video_path=excluded.video_path,files=excluded.files,size_bytes=excluded.size_bytes,mtime=excluded.mtime,
         dvdid=excluded.dvdid,dvdid_source=excluded.dvdid_source,title=excluded.title,
         original_title=excluded.original_title,plot=excluded.plot,release_date=excluded.release_date,
@@ -720,13 +932,84 @@ def _write_film(db, record: dict, existing: sqlite3.Row | None, preserve_manual:
     return changed
 
 
-def _film_from_row(db, row: sqlite3.Row) -> dict:
+def _film_from_row(db, row: sqlite3.Row, progress: dict | None = None) -> dict:
     item = dict(row)
     item['files'] = json.loads(item.get('files') or '[]')
     item['missing_fields'] = json.loads(item.get('missing_fields') or '[]')
     item['actress'] = [entry['name'] for entry in db.execute(
         'SELECT name FROM film_actress WHERE film_id=? ORDER BY ord', (row['id'],))]
+    item['progress'] = (progress or {}).get(row['id']) or _empty_progress()
     return item
+
+
+# ---------------------------------------------------------------------------
+# 播放进度（电影与分集共用一张表，跨设备共享）
+
+
+def _empty_progress() -> dict:
+    return {'position': 0.0, 'duration': 0.0, 'finished': False, 'percent': 0.0, 'updated_at': ''}
+
+
+def _progress_from_row(row: sqlite3.Row) -> dict:
+    position = float(row['position'] or 0)
+    duration = float(row['duration'] or 0)
+    return {
+        'position': position, 'duration': duration, 'finished': bool(row['finished']),
+        'percent': round(position / duration * 100, 1) if duration > 0 else 0.0,
+        'updated_at': row['updated_at'] or '',
+    }
+
+
+def _progress_map(db, film_ids: list[str]) -> dict[str, dict]:
+    ids = [item for item in film_ids if item]
+    if not ids:
+        return {}
+    marks = ','.join('?' for _ in ids)
+    rows = db.execute(f'SELECT * FROM film_progress WHERE film_id IN ({marks})', ids).fetchall()
+    return {row['film_id']: _progress_from_row(row) for row in rows}
+
+
+def save_progress(film_id: str, position: float, duration: float = 0) -> dict:
+    """记录播放进度；看到 95% 以上（或离结尾不足 60 秒）就算看完。"""
+    with connection() as db:
+        if not db.execute('SELECT 1 FROM films WHERE id=?', (film_id,)).fetchone():
+            raise ValueError('条目不存在')
+        position = max(0.0, float(position or 0))
+        duration = max(0.0, float(duration or 0))
+        finished = 1 if duration > 0 and (position >= duration * 0.95 or duration - position <= 60) else 0
+        db.execute(
+            'INSERT INTO film_progress(film_id,position,duration,finished,updated_at) VALUES(?,?,?,?,?) '
+            'ON CONFLICT(film_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,'
+            'finished=excluded.finished,updated_at=excluded.updated_at',
+            (film_id, position, duration, finished, now_iso()))
+        row = db.execute('SELECT * FROM film_progress WHERE film_id=?', (film_id,)).fetchone()
+    return _progress_from_row(row)
+
+
+def clear_progress(film_id: str) -> bool:
+    with connection() as db:
+        return db.execute('DELETE FROM film_progress WHERE film_id=?', (film_id,)).rowcount > 0
+
+
+def series_progress(series_id: str) -> dict:
+    """整部剧的观看情况：已看几集、下一集从哪开始（给剧集页的「继续观看」用）。"""
+    with connection() as db:
+        rows = db.execute(
+            "SELECT f.id, f.season, f.episode, f.title, p.position, p.duration, p.finished "
+            "FROM films f LEFT JOIN film_progress p ON p.film_id=f.id "
+            "WHERE f.parent_id=? AND f.kind='episode' ORDER BY f.season, f.episode",
+            (series_id,)).fetchall()
+    total = len(rows)
+    watched = sum(1 for row in rows if row['finished'])
+    in_progress = next((row for row in rows if (row['position'] or 0) > 0 and not row['finished']), None)
+    unwatched = in_progress or next((row for row in rows if not row['finished']), None)
+    resume = None
+    if unwatched is not None:
+        resume = {'film_id': unwatched['id'], 'season': int(unwatched['season'] or 0),
+                  'episode': int(unwatched['episode'] or 0), 'title': unwatched['title'] or '',
+                  'position': float(unwatched['position'] or 0),
+                  'duration': float(unwatched['duration'] or 0)}
+    return {'total': total, 'watched': watched, 'resume': resume}
 
 
 # ---------------------------------------------------------------------------
@@ -764,10 +1047,11 @@ def _collect(root: dict, scanner: dict | None = None, minimum: int = 0) -> tuple
 
 
 def _update_scan(db, scan: dict, **values) -> None:
-    scan.update(values)
+    """先写库再更新内存：客户端看到「已完成」时，数据一定已经落盘。"""
     fields = ','.join(f'{key}=?' for key in values)
     db.execute(f'UPDATE scans SET {fields} WHERE id=?', [*values.values(), scan['id']])
     db.commit()
+    scan.update(values)
 
 
 def _run_scan(scan: dict, library: dict) -> None:
@@ -783,13 +1067,20 @@ def _run_scan(scan: dict, library: dict) -> None:
                 if not os.path.isdir(root['path']):
                     db.execute('UPDATE roots SET scan_status=? WHERE id=?', ('failed', root['id']))
                     continue
-                groups, root_skipped = _collect(root, scanner, minimum)
-                skipped += root_skipped
+                if library.get('kind') == 'series':
+                    # 剧集库：一个目录一部剧，再拆成分集；不分「分片」，每集独立一条
+                    records, root_skipped = _series_records(root, scanner, minimum)
+                    skipped += root_skipped
+                else:
+                    groups, root_skipped = _collect(root, scanner, minimum)
+                    skipped += root_skipped
+                    records = [
+                        _record_for_files(root, Path(directory), files,
+                                          sum(1 for key in groups if key[0] == directory) == 1)
+                        for (directory, _), files in groups.items()
+                    ]
                 seen = set()
-                for (directory, _), files in groups.items():
-                    directory_path = Path(directory)
-                    single_group = sum(1 for key in groups if key[0] == directory) == 1
-                    record = _record_for_files(root, directory_path, files, single_group)
+                for record in records:
                     existing = db.execute('SELECT * FROM films WHERE id=?', (record['id'],)).fetchone()
                     if _write_film(db, record, existing):
                         if existing is None:
@@ -885,7 +1176,8 @@ STATUS_FILTERS = {
 
 
 def _conditions(library_id: str = '', folder_id: str = '', status: str = '', query: str = '',
-                group_by: str = '', group: str = ''):
+                group_by: str = '', group: str = '', kind: str = '', parent: str = '',
+                season: int | None = None):
     conditions, params = [], []
     if folder_id:
         conditions.append('f.root_id=?')
@@ -893,6 +1185,21 @@ def _conditions(library_id: str = '', folder_id: str = '', status: str = '', que
     elif library_id:
         conditions.append('f.root_id IN (SELECT root_id FROM library_roots WHERE library_id=?)')
         params.append(library_id)
+    if kind:
+        conditions.append('f.kind=?')
+        params.append(kind)
+    elif not parent:
+        # 分集不混进影片墙：只有明确按 parent 看某部剧时才带出来
+        conditions.append("f.kind<>'episode'")
+        if not library_id and not folder_id:
+            # 「全部影片」是跨库的影片墙，剧集由各自的剧集库浏览
+            conditions.append("f.kind<>'series'")
+    if parent:
+        conditions.append('f.parent_id=?')
+        params.append(parent)
+    if season is not None:
+        conditions.append('f.season=?')
+        params.append(int(season))
     if status and status in STATUS_FILTERS:
         conditions.append(STATUS_FILTERS[status])
     if query:
@@ -916,8 +1223,10 @@ def _conditions(library_id: str = '', folder_id: str = '', status: str = '', que
 
 def list_films(library_id: str = '', folder_id: str = '', status: str = '', query: str = '',
                group_by: str = '', group: str = '', sort: str = 'updated', direction: str = 'desc',
-               limit: int = 48, offset: int = 0) -> dict:
-    conditions, params = _conditions(library_id, folder_id, status, query, group_by, group)
+               limit: int = 48, offset: int = 0, kind: str = '', parent: str = '',
+               season: int | None = None) -> dict:
+    conditions, params = _conditions(library_id, folder_id, status, query, group_by, group,
+                                     kind, parent, season)
     where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
     order = {
         'release': "coalesce(f.release_date,'')",
@@ -925,15 +1234,19 @@ def list_films(library_id: str = '', folder_id: str = '', status: str = '', quer
         'title': 'f.title',
         'size': 'f.size_bytes',
     }.get(sort, 'f.updated_at')
+    if parent:
+        # 分集按季集号排，和影片墙的排序互不影响
+        order = 'f.season, f.episode, f.title'
     order += ' ASC' if direction == 'asc' else ' DESC'
     with connection() as db:
         total = db.execute('SELECT count(*) FROM films f' + where, params).fetchone()[0]
         offset = min(offset, max(0, ((total - 1) // limit) * limit)) if total else 0
         rows = db.execute(f'SELECT f.* FROM films f{where} ORDER BY {order},f.id LIMIT ? OFFSET ?',
                           [*params, limit, offset]).fetchall()
-        items = [_film_from_row(db, row) for row in rows]
+        progress = _progress_map(db, [row['id'] for row in rows])
+        items = [_film_from_row(db, row, progress) for row in rows]
         stats = _stats(db, library_id=library_id, folder_id=folder_id, query=query,
-                       group_by=group_by, group=group)
+                       group_by=group_by, group=group, kind=kind, parent=parent, season=season)
     return {'items': items, 'total': total, 'limit': limit, 'offset': offset, 'stats': stats}
 
 
@@ -946,12 +1259,14 @@ def _film_scope(library_id: str = '', folder_id: str = '') -> tuple[str, list]:
 
 
 def _stats(db, library_id: str = '', folder_id: str = '', query: str = '',
-           group_by: str = '', group: str = '') -> dict:
+           group_by: str = '', group: str = '', kind: str = '', parent: str = '',
+           season: int | None = None) -> dict:
     """统计当前筛选范围（媒体库/文件夹/搜索/分类）的状态分布。
 
     状态本身是统计维度，所以这里不按 status 过滤；分类和搜索会跟随。
     """
-    conditions, params = _conditions(library_id, folder_id, '', query, group_by, group)
+    conditions, params = _conditions(library_id, folder_id, '', query, group_by, group,
+                                     kind, parent, season)
     where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
     rows = dict(db.execute('SELECT f.status,count(*) FROM films f' + where + ' GROUP BY f.status',
                            params).fetchall())
@@ -968,12 +1283,77 @@ def _stats(db, library_id: str = '', folder_id: str = '', query: str = '',
     }
 
 
+def series_stats(library_id: str = '', parent: str = '') -> dict[str, dict]:
+    """每部剧的季数与集数（series id → {seasons, episodes}），用于剧集卡片。"""
+    conditions, params = ["kind='episode'"], []
+    if parent:
+        conditions.append('parent_id=?')
+        params.append(parent)
+    elif library_id:
+        conditions.append('root_id IN (SELECT root_id FROM library_roots WHERE library_id=?)')
+        params.append(library_id)
+    where = ' WHERE ' + ' AND '.join(conditions)
+    with connection() as db:
+        rows = db.execute(
+            f'SELECT parent_id, count(*), count(DISTINCT season) FROM films{where} GROUP BY parent_id',
+            params).fetchall()
+    return {str(row[0]): {'episodes': int(row[1]), 'seasons': int(row[2])} for row in rows if row[0]}
+
+
+def series_seasons(series_id: str) -> list[dict]:
+    """一部剧的季列表（季号 + 集数），用于剧集页的季切换标签。"""
+    with connection() as db:
+        rows = db.execute(
+            "SELECT season, count(*) FROM films WHERE parent_id=? AND kind='episode' "
+            'GROUP BY season ORDER BY season', (series_id,)).fetchall()
+    return [{'season': int(row[0] or 0), 'episodes': int(row[1])} for row in rows]
+
+
+def refresh_series(film_id: str) -> dict:
+    """重新读取某部剧的 tvshow.nfo 与分集 NFO。
+
+    剧集库不接在线元数据源（18+ 内容在公开库里也查不到），所以「刷新」= 按磁盘现状重建索引：
+    补了新一集、改了目录名、加了 NFO，点一下即可同步。
+    """
+    with connection() as db:
+        row = db.execute('SELECT * FROM films WHERE id=?', (film_id,)).fetchone()
+        if not row:
+            raise ValueError('条目不存在')
+        if row['kind'] != 'series':
+            raise ValueError('只有剧集条目可以刷新')
+        root_row = db.execute('SELECT * FROM roots WHERE id=?', (row['root_id'],)).fetchone()
+        if not root_row:
+            raise ValueError('剧集所在文件夹已移除')
+        root = {**dict(root_row), 'recursive': bool(root_row['recursive'])}
+        library = db.execute('SELECT * FROM libraries WHERE id IN '
+                             '(SELECT library_id FROM library_roots WHERE root_id=?)',
+                             (root['id'],)).fetchone()
+    series_dir = Path(row['dir_path'])
+    if not series_dir.is_dir():
+        raise ValueError('剧集目录不存在，无法刷新')
+    scanner, minimum = preset_scan_limits((library['preset_id'] if library else 'default') or 'default')
+    records, _ = _series_records_for(root, series_dir, scanner, minimum)
+    keep = {record['id'] for record in records}
+    with connection() as db:
+        for record in records:
+            existing = db.execute('SELECT * FROM films WHERE id=?', (record['id'],)).fetchone()
+            _write_film(db, record, existing)
+        stale = db.execute("SELECT id FROM films WHERE parent_id=? AND kind='episode'", (film_id,)).fetchall()
+        for item in stale:
+            if item['id'] not in keep:
+                db.execute('DELETE FROM films WHERE id=?', (item['id'],))
+        db.execute('UPDATE films SET updated_at=? WHERE id=?', (now_iso(), film_id))
+    return get_film(film_id) or {}
+
+
 def get_film(film_id: str, reconcile: bool = True) -> dict | None:
     if reconcile:
         _reconcile(film_id)
     with connection() as db:
         row = db.execute('SELECT * FROM films WHERE id=?', (film_id,)).fetchone()
-        return _film_from_row(db, row) if row else None
+        if not row:
+            return None
+        return _film_from_row(db, row, _progress_map(db, [film_id]))
 
 
 def _refresh_film(film_id: str, preserve_manual: bool = True) -> None:
@@ -1158,8 +1538,12 @@ def refresh_film_after_task(film_id: str, status: str, error: str = '', task: di
 
 def film_ids(library_id: str = '', folder_id: str = '', status: str = '', query: str = '',
              group_by: str = '', group: str = '', limit: int = 2000) -> list[str]:
-    """按媒体库的筛选条件取影片 id，供批量刮削使用（与列表页同一套条件）。"""
+    """按媒体库的筛选条件取影片 id，供批量刮削使用（与列表页同一套条件）。
+
+    剧集库不联网刮削，所以这里只取普通影片。
+    """
     conditions, params = _conditions(library_id, folder_id, status, query, group_by, group)
+    conditions.append("f.kind='movie'")
     where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
     with connection() as db:
         rows = db.execute(
@@ -1500,6 +1884,8 @@ def start_scrape(film_id: str, dvdid: str | None = None, preset_id: str | None =
     film = get_film(film_id)
     if not film:
         raise ValueError('影片不存在')
+    if film.get('kind') in ('series', 'episode'):
+        raise ValueError('剧集库不联网刮削，请用「刷新」重新读取 NFO')
     if film['scrape_state'] in ('queued', 'running'):
         raise ValueError('该影片正在刮削')
     video = Path(film['video_path'])

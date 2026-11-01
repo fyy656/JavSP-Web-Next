@@ -26,6 +26,8 @@ exe-icon-preview.png
 
 # Local audit work, database backups, and the independent comments repository
 /tmp/
+# tests/test_multipart.py 在仓库根目录建临时目录（Windows 下句柄未释放时清不掉）
+/tmp*/
 /debug.log
 /comments-service/
 

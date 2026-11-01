@@ -31,6 +31,19 @@
   <script src="/assets/theme.js?v=__ASSET_VERSION__"></script>
   <script>
     const normalizeVersion = (value) => String(value || '').replace(/^[vV]+/, '');
+    const mobileApp = (() => {
+      try {
+        const flag = new URLSearchParams(location.search).get('mobile');
+        if (flag === '1') localStorage.setItem('javsp-web.mobile-app', '1');
+        return localStorage.getItem('javsp-web.mobile-app') === '1';
+      } catch (_) {
+        return false;
+      }
+    })();
+    if (mobileApp) {
+      const hint = document.querySelector('.hint');
+      if (hint) hint.textContent = '登录后即可浏览媒体库、扫描与播放；账号与系统设置请在电脑上操作。';
+    }
     fetch('/api/public-info').then((response) => response.ok ? response.json() : null).then((info) => { if (info && info.version) document.querySelector('#login-version').textContent = `v${normalizeVersion(info.version)}`; }).catch(() => {});
     const form = document.querySelector('#login-form');
     form.addEventListener('submit', async (event) => {
@@ -41,7 +54,7 @@
       try {
         const response = await fetch('/api/auth/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:document.querySelector('#username').value.trim(), password:document.querySelector('#password').value})});
         if (!response.ok) throw new Error((await response.json()).detail || '登录失败');
-        location.href = '/';
+        location.href = mobileApp ? '/?mobile=1' : '/';
       } catch (error) {
         document.querySelector('#login-error').textContent = error.message;
       } finally { button.disabled = false; }
