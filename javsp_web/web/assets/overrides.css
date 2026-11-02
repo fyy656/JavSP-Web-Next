@@ -919,7 +919,7 @@ html[data-privacy-mode="1"] .lib-detail-cover img { filter: blur(14px); transfor
 .lib-player-scope { display: grid; gap: 0; }
 .lib-player-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; background: #101014 /* theme: fixed */; color: #e9e9ee /* theme: fixed */; font-size: 12px; }
 .lib-player-topbar .muted { color: #a9a9b8 /* theme: fixed */; }
-.lib-player-actions { display: flex; align-items: center; gap: 8px; }
+.lib-player-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 #library-player-mode { min-width: 76px; }
 .lib-player-box { width: 100%; aspect-ratio: 16 / 9; max-height: 88vh; background: #000 /* theme: fixed */; }
 .lib-player-box[hidden] { display: none; }
@@ -939,8 +939,8 @@ html[data-privacy-mode="1"] .lib-detail-cover img { filter: blur(14px); transfor
 
 /* 剧集库（Emby 版式）：大海报头部 + 横向分集卡片 + 演职员 */
 .lib-grid--series { display: block; }
-.lib-back { justify-self: start; padding: 0; border: 0; background: transparent; color: var(--accent-ink); font-size: 13px; cursor: pointer; }
-.lib-back:hover { text-decoration: underline; }
+.lib-back { justify-self: start; display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border: 1px solid var(--accent-border); border-radius: 999px; background: var(--accent-soft); color: var(--accent-ink); font-size: 13px; font-weight: 600; cursor: pointer; transition: background .16s ease, border-color .16s ease; }
+.lib-back:hover { background: var(--accent-border-pale); border-color: var(--accent); }
 .lib-hero { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 24px; align-items: start; margin: 0 0 24px; }
 .lib-hero-poster { display: grid; place-items: center; aspect-ratio: 2 / 3; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-muted); }
 .lib-hero-poster img { width: 100%; height: 100%; object-fit: cover; }

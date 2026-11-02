@@ -788,7 +788,7 @@ async function main() {
 
   // 剧集库：卡片显示季/集与 NFO 状态，季标签按接口给的季渲染，分集行带集号
   {
-    const { library } = boot();
+    const { library, element } = boot();
     const internals = library.internals;
     const state = internals.state;
     state.libraries = [{ id: 'lib-series', name: '剧集库', kind: 'series', preset_id: 'default', folders: [] }];
@@ -872,6 +872,47 @@ async function main() {
     assert.match(resumed, /data-lib-play="e-9">▶ 播放/, '播放按钮只写「播放」，进度不写在按钮上');
     assert.doesNotMatch(resumed, /继续观看/);
 
+    // 返回按钮要显眼：统一的 lib-back 胶囊按钮，剧集页与分类页都用它
+    assert.match(resumed, /class="lib-back" type="button" data-lib-series-back/, '剧集页返回按钮用 lib-back');
+    state.groupBy = 'year';
+    state.group = '2026';
+    state.groups = [{ key: '2026', label: '2026', count: 6 }];
+    assert.match(internals.groupNavMarkup(), /class="lib-back" type="button" id="library-group-back"/, '分类页返回按钮用 lib-back');
+    state.groupBy = '';
+    state.group = null;
+
+    // 播放器的上一集 / 下一集
+    state.films = [
+      { id: 'e-1', kind: 'episode', season: 1, episode: 1, title: '一' },
+      { id: 'e-2', kind: 'episode', season: 1, episode: 2, title: '二' },
+      { id: 'e-3', kind: 'episode', season: 1, episode: 3, title: '三' },
+    ];
+    state.playingFilmId = 'e-2';
+    assert.equal(internals.episodeNeighbors().prev.id, 'e-1');
+    assert.equal(internals.episodeNeighbors().next.id, 'e-3');
+    state.playingFilmId = 'e-1';
+    assert.equal(internals.episodeNeighbors().prev, null, '第一集没有上一集');
+    state.playingFilmId = 'e-3';
+    assert.equal(internals.episodeNeighbors().next, null, '最后一集没有下一集');
+
+    // 顶栏按钮的可用状态：第一集禁用「上一集」、最后一集禁用「下一集」，电影直接隐藏
+    state.seasons = [{ season: 1, episodes: 3 }];
+    state.seasonFocus = 1;
+    internals.updateEpisodeNav();
+    assert.equal(element('library-player-prev').hidden, false);
+    assert.equal(element('library-player-next').hidden, false);
+    assert.equal(element('library-player-next').disabled, true, '最后一集禁用下一集');
+    state.playingFilmId = 'e-1';
+    internals.updateEpisodeNav();
+    assert.equal(element('library-player-prev').disabled, true, '第一集禁用上一集');
+    state.films = [{ id: 'm-1', kind: 'movie' }];
+    state.playingFilmId = 'm-1';
+    internals.updateEpisodeNav();
+    assert.equal(element('library-player-prev').hidden, true, '电影不显示上一集/下一集');
+
+    const pageHtml = fs.readFileSync(path.join(__dirname, '../javsp_web/web/index.html'), 'utf8');
+    assert.match(pageHtml, /id="library-player-prev"/, '播放器要有上一集按钮');
+    assert.match(pageHtml, /id="library-player-next"/, '播放器要有下一集按钮');
     // 建库与设置里都能选类型
     const page = fs.readFileSync(path.join(__dirname, '../javsp_web/web/index.html'), 'utf8');
     assert.match(page, /<option value="series">剧集/, '新建媒体库要能选剧集');

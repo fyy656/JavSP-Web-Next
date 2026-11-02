@@ -305,7 +305,7 @@
     const label = { actress: '女优', studio: '片商', year: '年份' }[state.groupBy] || '分类';
     const current = state.groups.find((group) => group.key === state.group);
     const name = current ? groupLabel(current) : (state.group || '未知');
-    return `<button class="button secondary small" type="button" id="library-group-back">← 返回${label}列表</button>`
+    return `<button class="lib-back" type="button" id="library-group-back">← 返回${label}列表</button>`
       + `<span class="muted">当前：${escape(name)}</span>`;
   }
 
@@ -1287,6 +1287,7 @@
     state.playingFilmId = '';
     playerPayload = null;
     window.clearInterval(playerTimer);
+    updateEpisodeNav();
     // 关掉播放器后回读一次整部剧的观看情况，卡片上的进度条和「继续观看」才能对上
     if (!keepDialog) setTimeout(refreshSeriesProgress, 400);
   }
@@ -1422,6 +1423,57 @@
     return playFilm(filmId);
   }
 
+  /** 当前分集在列表里的前后集（只有剧集库的分集才有） */
+  function episodeNeighbors(filmId = state.playingFilmId) {
+    const list = (state.films || [])
+      .filter((item) => item.kind === 'episode')
+      .slice()
+      .sort((left, right) => (left.season || 0) - (right.season || 0) || (left.episode || 0) - (right.episode || 0));
+    const index = list.findIndex((item) => item.id === filmId);
+    if (index < 0) return { prev: null, next: null };
+    return { prev: list[index - 1] || null, next: list[index + 1] || null };
+  }
+
+  function seasonNumbers() {
+    return (state.seasons || []).map((item) => Number(item.season)).sort((left, right) => left - right);
+  }
+
+  function hasAdjacentSeason(direction) {
+    if (!seriesMode() || !state.seriesFocus) return false;
+    const seasons = seasonNumbers();
+    const index = seasons.indexOf(Number(state.seasonFocus));
+    return index >= 0 && seasons[index + direction] !== undefined;
+  }
+
+  /** 播放器顶栏的「上一集 / 下一集」：到季首季尾时跨到相邻季 */
+  function updateEpisodeNav() {
+    const prevButton = el('library-player-prev');
+    const nextButton = el('library-player-next');
+    if (!prevButton || !nextButton) return;
+    const playing = (state.films || []).find((item) => item.id === state.playingFilmId);
+    const isEpisode = Boolean(playing && playing.kind === 'episode');
+    prevButton.hidden = !isEpisode;
+    nextButton.hidden = !isEpisode;
+    if (!isEpisode) return;
+    const { prev, next } = episodeNeighbors();
+    prevButton.disabled = !prev && !hasAdjacentSeason(-1);
+    nextButton.disabled = !next && !hasAdjacentSeason(1);
+  }
+
+  async function playAdjacentEpisode(direction) {
+    const { prev, next } = episodeNeighbors();
+    let target = direction > 0 ? next : prev;
+    if (!target && hasAdjacentSeason(direction)) {
+      const seasons = seasonNumbers();
+      const index = seasons.indexOf(Number(state.seasonFocus));
+      await focusSeason(seasons[index + direction]);
+      const items = (state.films || []).slice()
+        .sort((left, right) => (left.episode || 0) - (right.episode || 0));
+      target = direction > 0 ? items[0] : items[items.length - 1];
+    }
+    if (target) openPlayer(target.id);
+  }
+
   async function playFilm(filmId, options = {}) {
     const { panel } = playbackElements();
     if (!panel) return;
@@ -1438,6 +1490,7 @@
       state.previousFilmId = filmId;
       playerPayload = payload;
       updatePlayerStatus(payload);
+      updateEpisodeNav();
       const art = ensureArtPlayer();
       if (!art) bindNativePlayer();
       const video = playerVideo();
@@ -1795,6 +1848,16 @@
       openPlayer(event.target.closest('[data-lib-play]').dataset.libPlay);
       return;
     }
+    if (event.target.closest('#library-player-prev')) {
+      event.preventDefault();
+      playAdjacentEpisode(-1);
+      return;
+    }
+    if (event.target.closest('#library-player-next')) {
+      event.preventDefault();
+      playAdjacentEpisode(1);
+      return;
+    }
     if (event.target.closest('#library-player-mode')) {
       event.preventDefault();
       switchPlaybackMode();
@@ -2009,7 +2072,7 @@
       groupCardsMarkup, groupCoverMarkup, applyPosterTier,
       // 剧集库：卡片、剧集头部、季标签 + 分集行
       seriesCardMarkup, seriesHeaderMarkup, episodesMarkup, episodeRowMarkup, render, gridMarkup,
-      activeKind, seriesMode, SEASON_LABEL, episodeLabel,
+      activeKind, seriesMode, SEASON_LABEL, episodeLabel, episodeNeighbors, groupNavMarkup, updateEpisodeNav,
     },
 
   };
