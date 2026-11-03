@@ -394,6 +394,86 @@ class SeriesScanTests(unittest.TestCase):
         db.close()
         self.assertEqual(left, 0, '影片从索引移除后，进度记录要跟着删掉')
 
+    def test_series_metadata_writes_tvshow_nfo(self):
+        """剧集资料写进剧集目录的 tvshow.nfo，根节点是 tvshow。"""
+        touch(self.media / '剧NF' / 'NF.S01E01.mkv')
+        library = self._scan()
+        series = self._series(library['id'])[0]
+        updated = library_store.update_film(series['id'], {
+            'title': '新剧名', 'original_title': 'New Show', 'plot': '新简介',
+            'release_date': '2026-01-02', 'studio': 'CCTV', 'actress': ['演员甲', '演员乙'],
+        }, write_nfo=True)
+        self.assertEqual(updated['title'], '新剧名')
+        target = Path(updated['nfo_path'])
+        self.assertEqual(target.name, 'tvshow.nfo')
+        self.assertEqual(target.parent, self.media / '剧NF')
+        text = target.read_text(encoding='utf-8')
+        self.assertIn('<tvshow>', text)
+        self.assertIn('新剧名', text)
+        self.assertIn('<year>2026</year>', text)
+        self.assertIn('演员甲', text)
+        self.assertNotIn('<uniqueid', text, '剧集没有番号')
+        self.assertEqual([name for name in updated['actress']], ['演员甲', '演员乙'])
+
+    def test_series_nfo_keeps_leading_comment(self):
+        """重写 tvshow.nfo 时保留根节点前的注释（tinyMediaManager 的 created by）。"""
+        folder = self.media / '剧NK'
+        touch(folder / 'NK.S01E01.mkv')
+        (folder / 'tvshow.nfo').write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!--created on 2026-10-09 by tinyMediaManager-->\n'
+            '<tvshow><title>旧名</title></tvshow>\n', encoding='utf-8')
+        library = self._scan()
+        series = self._series(library['id'])[0]
+        library_store.update_film(series['id'], {'title': '新名', 'plot': '简介'}, write_nfo=True)
+        text = (folder / 'tvshow.nfo').read_text(encoding='utf-8')
+        self.assertIn('created on 2026-10-09 by tinyMediaManager', text)
+        self.assertIn('<title>新名</title>', text)
+        self.assertIn('<plot>简介</plot>', text)
+
+    def test_episode_metadata_writes_episode_nfo(self):
+        """分集资料写进该集的 NFO，根节点是 episodedetails，并带上季集号。"""
+        touch(self.media / '剧NG' / 'NG.S01E02.mkv')
+        library = self._scan()
+        series = self._series(library['id'])[0]
+        episode = library_store.list_films(library['id'], parent=series['id'])['items'][0]
+        updated = library_store.update_film(episode['id'], {
+            'title': '第二集标题', 'plot': '本集简介', 'release_date': '2026-01-05', 'runtime': 45,
+        }, write_nfo=True)
+        text = Path(updated['nfo_path']).read_text(encoding='utf-8')
+        self.assertIn('<episodedetails>', text)
+        self.assertIn('第二集标题', text)
+        self.assertIn('<season>1</season>', text)
+        self.assertIn('<episode>2</episode>', text)
+        self.assertIn('<aired>2026-01-05</aired>', text)
+        self.assertEqual(updated['title'], '第二集标题')
+
+    def test_season_nfo_round_trip(self):
+        """季 NFO 单独读写：单季放在剧集目录，根节点必须是 season。"""
+        touch(self.media / '剧NH' / 'NH.S01E01.mkv')
+        library = self._scan()
+        series = self._series(library['id'])[0]
+        self.assertEqual(library_store.read_season_nfo(series['id'], 1)['content'], '')
+
+        content = ('<?xml version="1.0" encoding="utf-8"?>'
+                   '<season><seasonnumber>1</seasonnumber><name>第一季</name><plot>整季简介</plot></season>')
+        saved = library_store.write_season_nfo(series['id'], 1, content)
+        self.assertEqual(Path(saved['path']).name, 'season.nfo')
+        self.assertEqual(Path(saved['path']).parent, self.media / '剧NH')
+        self.assertIn('第一季', library_store.read_season_nfo(series['id'], 1)['content'])
+
+        with self.assertRaises(ValueError):
+            library_store.write_season_nfo(series['id'], 1, '<tvshow/>')
+
+    def test_raw_nfo_root_must_match_kind(self):
+        touch(self.media / '剧NI' / 'NI.S01E01.mkv')
+        library = self._scan()
+        series = self._series(library['id'])[0]
+        with self.assertRaises(ValueError):
+            library_store.write_raw_nfo(series['id'], '<movie/>')
+        saved = library_store.write_raw_nfo(series['id'], '<tvshow><title>直改</title></tvshow>')
+        self.assertIn('直改', saved['content'])
+
     def test_rescan_removes_deleted_episodes(self):
         touch(self.media / '剧J' / 'S01' / 'J.S01E01.mkv')
         touch(self.media / '剧J' / 'S01' / 'J.S01E02.mkv')
@@ -564,6 +644,38 @@ class SeriesApiTests(SeriesScanTests):
         batch = self.client.post('/api/library/films/scrape', json={'library_id': created['library']['id']})
         self.assertEqual(batch.status_code, 202, batch.text)
         self.assertEqual(batch.json()['accepted'], [])
+
+    def test_non_admin_cannot_modify_nfo_or_scrape(self):
+        """非管理员只能看和播：改资料、写 NFO、刷新、刮削一律 403。"""
+        touch(self.media / '剧NJ' / 'NJ.S01E01.mkv')
+        created = self.client.post('/api/library/libraries', json={
+            'name': '权限库', 'kind': 'series',
+            'folders': [{'path': str(self.media), 'recursive': True}], 'scan': False,
+        }).json()
+        library_id = created['library']['id']
+        self.scan_library(library_id)
+        series = self.client.get(f'/api/library/films?library_id={library_id}&kind=series').json()['items'][0]
+        override = self.server.app.dependency_overrides
+        override[self.server.current_user] = lambda: {'username': 'op', 'role': 'operator'}
+        try:
+            self.assertEqual(self.client.patch(f"/api/library/films/{series['id']}",
+                                               json={'title': 'x'}).status_code, 403)
+            self.assertEqual(self.client.put(f"/api/library/films/{series['id']}/nfo",
+                                             json={'content': '<tvshow/>'}).status_code, 403)
+            self.assertEqual(self.client.post(f"/api/library/films/{series['id']}/refresh").status_code, 403)
+            self.assertEqual(self.client.post(f"/api/library/films/{series['id']}/scrape",
+                                              json={}).status_code, 403)
+            self.assertEqual(self.client.post('/api/library/films/scrape',
+                                              json={'library_id': library_id}).status_code, 403)
+            self.assertEqual(self.client.put(f"/api/library/series/{series['id']}/season-nfo",
+                                             json={'season': 1, 'content': '<season/>'}).status_code, 403)
+            # 只读与播放不受影响
+            self.assertEqual(self.client.get(f"/api/library/films/{series['id']}").status_code, 200)
+            self.assertEqual(self.client.get(f"/api/library/series/{series['id']}/seasons").status_code, 200)
+            self.assertEqual(self.client.put(f"/api/library/films/{series['id']}/progress",
+                                             json={'position': 1, 'duration': 2}).status_code, 200)
+        finally:
+            override[self.server.current_user] = lambda: {'username': 'test', 'role': 'admin'}
 
     def test_progress_api_round_trip(self):
         for index in (1, 2):

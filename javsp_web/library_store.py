@@ -1632,9 +1632,20 @@ def groups(by: str, library_id: str = '', query: str = '', folder_id: str = '') 
 # Metadata / NFO writing
 
 
+# 不同条目对应的 NFO 根节点：电影 <movie>、剧集 <tvshow>、分集 <episodedetails>
+NFO_ROOT_BY_KIND = {'movie': 'movie', 'series': 'tvshow', 'episode': 'episodedetails'}
+
+
+def nfo_root_tag(kind: str) -> str:
+    return NFO_ROOT_BY_KIND.get(kind or 'movie', 'movie')
+
+
 def _nfo_target(film: dict) -> Path:
     """写入目标：始终用唯一的规范 NFO（避免同一部影片出现两个 NFO）。"""
     directory = Path(film['dir_path'])
+    # 剧集条目没有视频文件，资料写在剧集目录的 tvshow.nfo
+    if film.get('kind') == 'series':
+        return directory / 'tvshow.nfo'
     video = Path(film['video_path'])
     canonical = canonical_nfo_path(directory, video)
     if canonical.is_file():
@@ -1764,30 +1775,58 @@ def _merge_nfo_snapshot(film: dict) -> bool:
 
 
 def _write_nfo(film: dict, values: dict, expected_mtime: float | None) -> Path:
+    kind = film.get('kind') or 'movie'
+    root_tag = nfo_root_tag(kind)
     target = _nfo_target(film)
     if expected_mtime is not None and target.is_file():
         actual = target.stat().st_mtime
         if abs(actual - float(expected_mtime)) > 0.001:
             raise FileExistsError('NFO 已被其他程序修改，请重新读取后再保存')
+    head_comments = ''
     if target.is_file():
+        try:
+            raw = target.read_text(encoding='utf-8-sig', errors='replace')
+        except OSError:
+            raw = ''
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('<?xml') or not stripped:
+                continue
+            if stripped.startswith('<!--'):
+                head_comments += line.rstrip() + '\n'
+                continue
+            break
         root = ET.parse(target).getroot()
-        if str(root.tag).lower() != 'movie':
-            raise ValueError('现有 NFO 根节点不是 movie，已停止写入')
+        if str(root.tag).lower() != root_tag:
+            raise ValueError(f'现有 NFO 根节点不是 {root_tag}，已停止写入')
     else:
-        root = ET.Element('movie')
+        root = ET.Element(root_tag)
     _replace_text(root, 'title', values.get('title', ''))
     _replace_text(root, 'originaltitle', values.get('original_title', ''))
     _replace_text(root, 'plot', values.get('plot', ''))
-    _replace_text(root, 'premiered', values.get('release_date', ''))
-    _replace_text(root, 'studio', values.get('studio', ''))
-    _replace_text(root, 'publisher', values.get('publisher', ''))
-    _replace_text(root, 'director', values.get('director', ''))
-    _replace_text(root, 'runtime', str(values['runtime']) if values.get('runtime') else '')
-    for item in list(root.findall('uniqueid')):
-        if (item.get('type') or '').lower() == 'num':
-            root.remove(item)
-    if values.get('dvdid'):
-        ET.SubElement(root, 'uniqueid', {'type': 'num', 'default': 'true'}).text = values['dvdid']
+    if kind == 'series':
+        # <tvshow>：没有番号、没有时长，年份与首播日期分开写
+        _replace_text(root, 'showtitle', values.get('title', ''))
+        _replace_text(root, 'premiered', values.get('release_date', ''))
+        _replace_text(root, 'year', (values.get('release_date') or '')[:4])
+        _replace_text(root, 'studio', values.get('studio', ''))
+    elif kind == 'episode':
+        # <episodedetails>：播出日期写 aired，季集号以索引为准
+        _replace_text(root, 'aired', values.get('release_date', ''))
+        _replace_text(root, 'season', str(film.get('season') or 0))
+        _replace_text(root, 'episode', str(film.get('episode') or 0))
+        _replace_text(root, 'runtime', str(values['runtime']) if values.get('runtime') else '')
+    else:
+        _replace_text(root, 'premiered', values.get('release_date', ''))
+        _replace_text(root, 'studio', values.get('studio', ''))
+        _replace_text(root, 'publisher', values.get('publisher', ''))
+        _replace_text(root, 'director', values.get('director', ''))
+        _replace_text(root, 'runtime', str(values['runtime']) if values.get('runtime') else '')
+        for item in list(root.findall('uniqueid')):
+            if (item.get('type') or '').lower() == 'num':
+                root.remove(item)
+        if values.get('dvdid'):
+            ET.SubElement(root, 'uniqueid', {'type': 'num', 'default': 'true'}).text = values['dvdid']
     for item in list(root.findall('actor')):
         root.remove(item)
     for name in values.get('actress') or []:
@@ -1801,8 +1840,32 @@ def _write_nfo(film: dict, values: dict, expected_mtime: float | None) -> Path:
         shutil.copy2(target, backup)
     temporary = target.with_suffix(target.suffix + '.tmp')
     tree.write(temporary, encoding='utf-8', xml_declaration=True)
+    if head_comments:
+        text = temporary.read_text(encoding='utf-8')
+        declaration, separator, rest = text.partition('\n')
+        temporary.write_text(f'{declaration}{separator}{head_comments}{rest}', encoding='utf-8')
     temporary.replace(target)
     return target
+
+
+def _status_for_update(film: dict, payload: dict, nfo_path: str) -> tuple[str, list[str]]:
+    """保存资料后重算状态：电影沿用必需字段校验，剧集/分集按标题+封面判断。"""
+    kind = film.get('kind') or 'movie'
+    if kind == 'series':
+        if payload['title'] and film.get('cover_path'):
+            return 'complete', []
+        if payload['title'] or film.get('cover_path') or nfo_path:
+            return 'partial', []
+        return 'unscraped', []
+    if kind == 'episode':
+        has_thumb = bool(film.get('cover_path'))
+        if payload['title'] and has_thumb:
+            return 'complete', []
+        if payload['title'] or nfo_path:
+            return 'partial', []
+        return 'unscraped', []
+    return _status_for(payload['dvdid'], payload['title'], film['cover_path'],
+                       bool(nfo_path), '', payload['actress'], payload['studio'], payload['release_date'])
 
 
 def update_film(film_id: str, values: dict, write_nfo: bool = True,
@@ -1825,8 +1888,7 @@ def update_film(film_id: str, values: dict, write_nfo: bool = True,
     nfo_path = film['nfo_path']
     if write_nfo:
         nfo_path = str(_write_nfo(film, payload, expected_nfo_mtime))
-    status, missing = _status_for(payload['dvdid'], payload['title'], film['cover_path'],
-                                  bool(nfo_path), '', payload['actress'], payload['studio'], payload['release_date'])
+    status, missing = _status_for_update(film, payload, nfo_path)
     with connection() as db:
         db.execute("""UPDATE films SET dvdid=?,dvdid_source=?,title=?,original_title=?,plot=?,release_date=?,
             studio=?,publisher=?,director=?,runtime=?,actress_text=?,nfo_path=?,nfo_mtime=?,status=?,
@@ -1853,6 +1915,98 @@ def read_nfo(film_id: str) -> dict | None:
             'mtime': target.stat().st_mtime}
 
 
+def _season_dir(film: dict, season: int) -> Path:
+    """季目录：多季时 NFO 放在 Sxx 子目录，单季就放在剧集目录。"""
+    base = Path(film['dir_path'])
+    try:
+        for child in base.iterdir():
+            if child.is_dir() and series_scan.season_from_dir_name(child.name) == int(season):
+                return child
+    except OSError:
+        pass
+    return base
+
+
+def read_season_nfo(series_id: str, season: int) -> dict:
+    film = get_film(series_id, reconcile=False)
+    if not film or film.get('kind') != 'series':
+        raise ValueError('不是剧集条目')
+    target = _season_dir(film, season) / 'season.nfo'
+    if not target.is_file():
+        return {'content': '', 'path': str(target), 'mtime': 0, 'season': int(season)}
+    return {'content': target.read_text(encoding='utf-8', errors='replace'), 'path': str(target),
+            'mtime': target.stat().st_mtime, 'season': int(season)}
+
+
+def write_season_nfo(series_id: str, season: int, content: str,
+                     expected_mtime: float | None = None) -> dict:
+    """写入某一季的 season.nfo（根节点 season）。"""
+    film = get_film(series_id, reconcile=False)
+    if not film or film.get('kind') != 'series':
+        raise ValueError('不是剧集条目')
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError as exc:
+        raise ValueError(f'NFO XML 格式错误：{exc}') from exc
+    if str(root.tag).lower() != 'season':
+        raise ValueError('季 NFO 的根节点必须是 season')
+    target = _season_dir(film, season) / 'season.nfo'
+    if expected_mtime is not None and target.is_file() and \
+            abs(target.stat().st_mtime - float(expected_mtime)) > 0.001:
+        raise FileExistsError('NFO 已被其他程序修改，请重新读取后再保存')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_file():
+        shutil.copy2(target, target.with_suffix(target.suffix + '.bak'))
+    temporary = target.with_suffix(target.suffix + '.tmp')
+    temporary.write_text(content, encoding='utf-8')
+    temporary.replace(target)
+    return read_season_nfo(series_id, season)
+
+
+def _apply_nfo_fields(film_id: str, content: str) -> None:
+    """剧集/分集直接改原始 NFO 后，把常见字段回写到索引。
+
+    电影走 `_refresh_film`（按文件重建条目），但剧集条目没有自己的视频，
+    用那套逻辑会把 series 记录冲成电影记录，所以这里只按标签回填。
+    """
+    film = get_film(film_id, reconcile=False)
+    if not film:
+        return
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return
+
+    def text(tag: str) -> str:
+        return (root.findtext(tag) or '').strip()
+
+    actors = []
+    for node in root.findall('actor'):
+        name = (node.findtext('name') or '').strip()
+        if name:
+            actors.append(name)
+    payload = {
+        'title': text('title') or film['title'],
+        'original_title': text('originaltitle') or film['original_title'],
+        'plot': text('plot') or film['plot'],
+        'release_date': text('premiered') or text('aired') or text('year') or film['release_date'],
+        'studio': text('studio') or film['studio'],
+        'actress': actors or film['actress'],
+    }
+    target = _nfo_target(film)
+    status, missing = _status_for_update(film, {**payload, 'dvdid': film['dvdid']}, str(target))
+    with connection() as db:
+        db.execute("""UPDATE films SET title=?,original_title=?,plot=?,release_date=?,studio=?,
+            actress_text=?,nfo_path=?,nfo_mtime=?,status=?,missing_fields=?,updated_at=? WHERE id=?""",
+                   (payload['title'], payload['original_title'], payload['plot'], payload['release_date'],
+                    payload['studio'], '、'.join(payload['actress']), str(target),
+                    target.stat().st_mtime if target.is_file() else 0,
+                    status, json.dumps(missing, ensure_ascii=False), now_iso(), film_id))
+        db.execute('DELETE FROM film_actress WHERE film_id=?', (film_id,))
+        db.executemany('INSERT OR IGNORE INTO film_actress(film_id,name,ord) VALUES(?,?,?)',
+                       [(film_id, name, index) for index, name in enumerate(payload['actress'])])
+
+
 def write_raw_nfo(film_id: str, content: str, expected_mtime: float | None = None) -> dict | None:
     film = get_film(film_id, reconcile=False)
     if not film:
@@ -1861,8 +2015,9 @@ def write_raw_nfo(film_id: str, content: str, expected_mtime: float | None = Non
         root = ET.fromstring(content)
     except ET.ParseError as exc:
         raise ValueError(f'NFO XML 格式错误：{exc}') from exc
-    if str(root.tag).lower() != 'movie':
-        raise ValueError('NFO 根节点必须是 movie')
+    expected = nfo_root_tag(film.get('kind') or 'movie')
+    if str(root.tag).lower() != expected:
+        raise ValueError(f'NFO 根节点必须是 {expected}')
     target = _nfo_target(film)
     if expected_mtime is not None and target.is_file() and abs(target.stat().st_mtime - float(expected_mtime)) > 0.001:
         raise FileExistsError('NFO 已被其他程序修改，请重新读取后再保存')
@@ -1871,7 +2026,10 @@ def write_raw_nfo(film_id: str, content: str, expected_mtime: float | None = Non
     temporary = target.with_suffix(target.suffix + '.tmp')
     temporary.write_text(content, encoding='utf-8')
     temporary.replace(target)
-    _refresh_film(film_id, preserve_manual=False)
+    if film.get('kind') in ('series', 'episode'):
+        _apply_nfo_fields(film_id, content)
+    else:
+        _refresh_film(film_id, preserve_manual=False)
     return read_nfo(film_id)
 
 

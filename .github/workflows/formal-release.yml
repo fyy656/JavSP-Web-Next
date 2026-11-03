@@ -60,7 +60,47 @@ jobs:
       - name: Publish release asset
         uses: softprops/action-gh-release@v3
         with:
-          name: JavSP WEB ${{ github.ref_name }}
+          name: JavSP Next ${{ github.ref_name }}
           body_path: docs/RELEASE_NOTES_${{ github.ref_name }}.md
           generate_release_notes: false
-          files: dist/JavSP-Web.exe
+          files: dist/JavSP-Next.exe
+
+  android-release:
+    name: Build Android APK
+    # 需要发布安卓包时，在仓库 Settings → Variables 添加 PUBLISH_ANDROID=true，
+    # 并在 Secrets 里配置：
+    #   ANDROID_KEYSTORE_BASE64     签名证书 base64（base64 -w0 javsp-release.jks）
+    #   ANDROID_KEYSTORE_PASSWORD   storePassword
+    #   ANDROID_KEY_ALIAS           keyAlias
+    #   ANDROID_KEY_PASSWORD        keyPassword
+    if: ${{ vars.PUBLISH_ANDROID == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - name: Restore signing config
+        working-directory: android
+        run: |
+          mkdir -p keystore
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > keystore/javsp-release.jks
+          printf 'storeFile=keystore/javsp-release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            "${{ secrets.ANDROID_KEY_ALIAS }}" \
+            "${{ secrets.ANDROID_KEY_PASSWORD }}" > keystore.properties
+      - name: Build release APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:assembleRelease
+      - name: Rename APK
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk \
+            "JavSP-for-Android-${GITHUB_REF_NAME}.apk"
+      - name: Publish release asset
+        uses: softprops/action-gh-release@v3
+        with:
+          files: JavSP-for-Android-${{ github.ref_name }}.apk

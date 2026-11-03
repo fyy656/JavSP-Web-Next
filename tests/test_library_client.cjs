@@ -910,13 +910,52 @@ async function main() {
     internals.updateEpisodeNav();
     assert.equal(element('library-player-prev').hidden, true, '电影不显示上一集/下一集');
 
+    // 资料编辑：电影 / 剧集 / 分集三种表单，NFO 根节点提示各不相同
+    const movieForm = internals.detailMarkup(film());
+    assert.match(movieForm, /data-lib-field="dvdid"/, '电影要能改番号');
+    assert.match(movieForm, /根节点是否为 &lt;movie&gt;/);
+
+    const seriesForm = internals.detailMarkup({ ...series, season_count: 2, episode_count: 20 });
+    assert.match(seriesForm, /data-lib-field="title"/);
+    assert.match(seriesForm, /剧名/);
+    assert.doesNotMatch(seriesForm, /data-lib-field="dvdid"/, '剧集没有番号');
+    assert.match(seriesForm, /根节点是否为 &lt;tvshow&gt;/, '剧集写 tvshow.nfo');
+    assert.match(seriesForm, /2 季 · 20 集/);
+
+    const episodeForm = internals.detailMarkup({ ...film(), kind: 'episode', season: 1, episode: 2, title: '第二集' });
+    assert.match(episodeForm, /分集标题/);
+    assert.match(episodeForm, /S01E02/);
+    assert.match(episodeForm, /根节点是否为 &lt;episodedetails&gt;/, '分集写 episodedetails');
+    assert.doesNotMatch(episodeForm, /data-lib-field="dvdid"/);
+
+    // 剧集页与分集卡片上的编辑入口（仅管理员）
+    assert.match(internals.seriesHeaderMarkup(), /data-lib-edit="s-1">编辑资料/);
+    assert.match(internals.episodeRowMarkup({ id: 'e-5', season: 1, episode: 5, title: '五' }),
+      /data-lib-edit="e-5">编辑/);
+
+    // 季资料对话框依赖浏览器 DOMParser，离线环境只能校验入口和元素是否就位
     const pageHtml = fs.readFileSync(path.join(__dirname, '../javsp_web/web/index.html'), 'utf8');
+    assert.match(pageHtml, /id="library-season-dialog"/, '要有季资料对话框');
     assert.match(pageHtml, /id="library-player-prev"/, '播放器要有上一集按钮');
     assert.match(pageHtml, /id="library-player-next"/, '播放器要有下一集按钮');
     // 建库与设置里都能选类型
     const page = fs.readFileSync(path.join(__dirname, '../javsp_web/web/index.html'), 'utf8');
     assert.match(page, /<option value="series">剧集/, '新建媒体库要能选剧集');
     assert.match(page, /id="library-settings-kind"/, '媒体库设置里要能改类型');
+  }
+
+  // 非管理员：看不到改资料 / 刮削 / 刷新入口（服务端也会 403）
+  {
+    const { library } = boot({ role: 'operator' });
+    const internals = library.internals;
+    const card = internals.cardMarkup(film());
+    assert.doesNotMatch(card, /data-lib-scrape/, '非管理员看不到刮削按钮');
+    internals.state.seriesInfo = { id: 's-1', title: '某剧', cover_path: '' };
+    const head = internals.seriesHeaderMarkup();
+    assert.doesNotMatch(head, /data-lib-edit/, '非管理员看不到编辑资料');
+    assert.doesNotMatch(head, /data-lib-refresh/, '非管理员看不到刷新 NFO');
+    const ep = internals.episodeRowMarkup({ id: 'e-1', season: 1, episode: 1, title: '一' });
+    assert.doesNotMatch(ep, /data-lib-edit/, '非管理员看不到分集编辑');
   }
 
   // 剧集详情页：必须铺满整行（不能沿用海报墙的多列网格），返回按钮要在最上面

@@ -99,7 +99,7 @@ recover_interrupted_tasks()
 start_artwork_path_repair()
 updater.start_scheduler()
 start_cookiecloud_scheduler()
-app = FastAPI(title="JavSP WEB", version=__version__)
+app = FastAPI(title="JavSP Next", version=__version__)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 @app.on_event("startup")
@@ -589,7 +589,7 @@ def health() -> dict:
 
 @app.get("/api/public-info")
 def public_info() -> dict:
-    return {"name": "JavSP WEB", "version": _display_version()}
+    return {"name": "JavSP Next", "version": _display_version()}
 
 
 @app.get("/login")
@@ -2775,7 +2775,7 @@ def library_film_progress_clear(film_id: str, _: dict = Depends(current_user)) -
 
 
 @app.post("/api/library/films/{film_id}/refresh")
-def library_film_refresh(film_id: str, _: dict = Depends(current_user)) -> dict:
+def library_film_refresh(film_id: str, _: dict = Depends(require_admin)) -> dict:
     """剧集库的「刷新」：重新读取 tvshow.nfo 与分集 NFO（不联网）。"""
     try:
         film = library_store.refresh_series(film_id)
@@ -2801,6 +2801,32 @@ def update_library_film(film_id: str, body: LibraryFilmBody, _: dict = Depends(r
     return {"film": film}
 
 
+class LibrarySeasonNfoBody(BaseModel):
+    season: int = Field(default=1, ge=0)
+    content: str = ""
+    expected_mtime: float | None = None
+
+
+@app.get("/api/library/series/{film_id}/season-nfo")
+def library_season_nfo(film_id: str, season: int = 1, _: dict = Depends(current_user)) -> dict:
+    """某一季的 season.nfo：多季时放在 Sxx 子目录，单季放在剧集目录。"""
+    try:
+        return library_store.read_season_nfo(film_id, season)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/library/series/{film_id}/season-nfo")
+def library_season_nfo_write(film_id: str, body: LibrarySeasonNfoBody,
+                             _: dict = Depends(require_admin)) -> dict:
+    try:
+        return library_store.write_season_nfo(film_id, body.season, body.content, body.expected_mtime)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/library/films/{film_id}/nfo")
 def library_film_nfo(film_id: str, _: dict = Depends(current_user)) -> dict:
     _library_film_or_404(film_id, reconcile=False)
@@ -2820,7 +2846,7 @@ def write_library_film_nfo(film_id: str, body: LibraryNfoBody, _: dict = Depends
 
 
 @app.post("/api/library/films/{film_id}/scrape", status_code=202)
-def scrape_library_film(film_id: str, body: LibraryScrapeBody, _: dict = Depends(current_user)) -> dict:
+def scrape_library_film(film_id: str, body: LibraryScrapeBody, _: dict = Depends(require_admin)) -> dict:
     try:
         return library_store.start_scrape(film_id, body.dvdid, body.preset_id)
     except ValueError as exc:
@@ -2828,7 +2854,7 @@ def scrape_library_film(film_id: str, body: LibraryScrapeBody, _: dict = Depends
 
 
 @app.post("/api/library/films/scrape", status_code=202)
-def scrape_library_films(body: LibraryBatchScrapeBody, _: dict = Depends(current_user)) -> dict:
+def scrape_library_films(body: LibraryBatchScrapeBody, _: dict = Depends(require_admin)) -> dict:
     """批量刮削：按当前筛选范围（库/文件夹/状态/搜索/分组）或显式 ids 入队。
 
     已完整的影片同样可以入队，用于补齐 NFO 里缺的字段；预设的必需字段仍然生效。

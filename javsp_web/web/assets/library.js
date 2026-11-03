@@ -69,6 +69,7 @@
     groupsVisible: GROUP_PAGE, librariesFresh: false, playingFilmId: '', previousFilmId: '', playerSwitching: false,
     // 剧集库：点进某部剧后只看它的分集；季列表单独取（分集是分页的）
     seriesFocus: '', seriesInfo: null, seasons: [], seasonFocus: 0, seriesProgress: null,
+    seasonTarget: 1, seasonNfo: null,
     allCount: 0, allCovers: [],
     loading: false, loaded: false, active: null, nfo: null, pollTimer: null, busy: false,
   };
@@ -337,11 +338,14 @@
     const title = hasTitle(film) ? film.title : (film.dvdid ? `缺资料 · ${film.dvdid}` : '（缺少标题）');
     const meta = [film.detached ? '已整理' : '', film.release_date?.slice(0, 4), film.studio].filter(Boolean).join(' · ') || '—';
     const parts = (film.files || []).length > 1 ? `<span class="lib-parts">${film.files.length} 个文件</span>` : '';
-    const action = film.scrape_state === 'queued' || film.scrape_state === 'running'
-      ? '<button class="button small" type="button" disabled>刮削中</button>'
-      : film.dvdid
-        ? `<button class="button small secondary" type="button" data-lib-scrape="${escape(film.id)}">刮削</button>`
-        : `<button class="button small secondary" type="button" data-lib-scrape="${escape(film.id)}">填写番号</button>`;
+    const action = !isAdmin()
+      ? (film.scrape_state === 'queued' || film.scrape_state === 'running'
+        ? '<span class="muted">刮削中</span>' : '')
+      : film.scrape_state === 'queued' || film.scrape_state === 'running'
+        ? '<button class="button small" type="button" disabled>刮削中</button>'
+        : film.dvdid
+          ? `<button class="button small secondary" type="button" data-lib-scrape="${escape(film.id)}">刮削</button>`
+          : `<button class="button small secondary" type="button" data-lib-scrape="${escape(film.id)}">填写番号</button>`;
     return `<article class="lib-card" data-lib-film="${escape(film.id)}">
       <div class="lib-cover-wrap">
       <button class="lib-cover${cover ? '' : ' lib-cover--empty'}" type="button" data-lib-open="${escape(film.id)}" aria-label="打开 ${escape(film.dvdid || '影片')} 详情">${cover}${placeholder}<span class="lib-badge" data-tone="${status.tone}">${status.label}</span>${parts}</button>
@@ -380,7 +384,7 @@
         <small class="lib-meta">${escape(counts || '还没有分集')}</small>
       </div>
       <div class="lib-actions">
-        <button class="button small secondary" type="button" data-lib-refresh="${escape(film.id)}">刷新</button>
+        ${isAdmin() ? `<button class="button small secondary" type="button" data-lib-refresh="${escape(film.id)}">刷新</button>` : ''}
         <button class="button small" type="button" data-lib-series="${escape(film.id)}">分集</button>
       </div>
     </article>`;
@@ -407,7 +411,7 @@
         <span class="lib-ep-name">${escape(film.title || episodeLabel(film))}</span>
         ${bar}
       </button>
-      <p class="lib-ep-meta">${escape(meta || episodeLabel(film))}</p>
+      <p class="lib-ep-meta">${escape(meta || episodeLabel(film))}${isAdmin() ? `<button class="lib-ep-edit" type="button" data-lib-edit="${escape(film.id)}">编辑</button>` : ''}</p>
       ${film.plot ? `<p class="lib-ep-plot">${escape(film.plot)}</p>` : ''}
     </article>`;
   }
@@ -438,7 +442,8 @@
         ${meta ? `<p class="lib-hero-meta">${escape(meta)}</p>` : ''}
         <div class="lib-hero-actions">
           ${target ? `<button class="button primary" type="button" data-lib-play="${escape(target)}">▶ 播放</button>` : ''}
-          <button class="button secondary" type="button" data-lib-refresh="${escape(series.id)}">刷新 NFO</button>
+          ${isAdmin() ? `<button class="button secondary" type="button" data-lib-edit="${escape(series.id)}">编辑资料</button>` : ''}
+          ${isAdmin() ? `<button class="button secondary" type="button" data-lib-refresh="${escape(series.id)}">刷新 NFO</button>` : ''}
         </div>
         ${series.plot ? `<p class="lib-hero-plot">${escape(series.plot)}</p>` : ''}
       </div>
@@ -472,7 +477,9 @@
       ? `<div class="lib-tabs lib-season-tabs">${state.seasons.map((item) => `<button class="lib-tab${Number(item.season) === active ? ' active' : ''}" type="button" `
         + `data-lib-season="${item.season}">${SEASON_LABEL(item.season)}<span>${item.episodes}</span></button>`).join('')}</div>`
       : '';
-    return `<div class="lib-season-head"><h2>${SEASON_LABEL(active)}</h2>${tabs}</div>`
+    const seasonEdit = isAdmin()
+      ? `<button class="button small secondary" type="button" data-lib-season-edit="${active}">季资料</button>` : '';
+    return `<div class="lib-season-head"><h2>${SEASON_LABEL(active)}</h2>${tabs}${seasonEdit}</div>`
       + `<div class="lib-strip-wrap">
         <button class="lib-strip-nav lib-strip-nav--prev" type="button" data-lib-scroll="-1" aria-label="向前翻">‹</button>
         <div class="lib-strip" id="library-episode-strip">${episodes.map(episodeRowMarkup).join('')
@@ -587,8 +594,8 @@
     }
     const batchButton = el('library-batch-scrape');
     if (batchButton) {
-      // 剧集库不联网刮削，批量刮削按钮没有意义
-      batchButton.hidden = series;
+      // 剧集库不联网刮削；刮削会写 NFO，只有管理员能用
+      batchButton.hidden = series || !isAdmin();
       batchButton.disabled = series || !hasLibraries || !state.activeLibraryId || !state.total;
       batchButton.title = `把当前筛选的 ${state.total} 部影片加入刮削队列`;
     }
@@ -1606,6 +1613,14 @@
 
   // ------------------------------------------------------------------ 影片详情
   function detailMarkup(film) {
+    const kind = film.kind || 'movie';
+    if (kind === 'series') return seriesDetailMarkup(film);
+    if (kind === 'episode') return episodeDetailMarkup(film);
+    return movieDetailMarkup(film);
+  }
+
+  /** 电影详情：番号 + 全套字段 + <movie> NFO */
+  function movieDetailMarkup(film) {
     const status = toneFor(film);
     const missing = (film.missing_fields || []).map((key) => MISSING_LABELS[key] || key);
     const source = { nfo: '来自 NFO', filename: '来自文件名', manual: '手动指定' }[film.dvdid_source] || '未知';
@@ -1654,6 +1669,181 @@
         <textarea data-lib-nfo rows="10" spellcheck="false"></textarea>
         <div class="lib-nfo-actions"><button class="button secondary" type="button" data-lib-nfo-reload>重新读取</button><button class="button secondary" type="button" data-lib-nfo-save>保存原始 NFO</button><span class="muted" data-lib-nfo-state></span></div>
       </details>`;
+  }
+
+  /** 剧集详情：没有番号/时长，字段写进剧集目录的 <tvshow> NFO */
+  function seriesDetailMarkup(film) {
+    const status = toneFor(film);
+    const cover = film.cover_path
+      ? `<img alt="" src="${coverUrl(film)}">`
+      : '<span class="lib-cover-text">无封面</span>';
+    const field = (name, label, value, extra = '') => `<label>${label}<input data-lib-field="${name}" value="${escape(value ?? '')}"${extra}></label>`;
+    const names = (Array.isArray(film.actress) ? film.actress : String(film.actress || '').split(/[、,，;；]/))
+      .map((name) => String(name || '').trim()).filter(Boolean);
+    const counts = [(film.season_count || 0) ? `${film.season_count} 季` : '',
+      (film.episode_count || 0) ? `${film.episode_count} 集` : ''].filter(Boolean).join(' · ');
+    return `<div class="lib-detail-head">
+        <div class="lib-detail-cover${film.cover_path ? '' : ' lib-cover--empty'}">${cover}</div>
+        <div class="lib-detail-summary">
+          <span class="lib-badge" data-tone="${status.tone}">${status.label}</span>
+          <p class="muted">${counts ? `剧集 · ${counts}` : '剧集'}</p>
+          <p class="muted">目录：${escape(film.dir_path || '')}</p>
+          <p class="muted">资料写入：${escape(film.nfo_path || '保存后创建 tvshow.nfo')}</p>
+          <p class="muted">分集资料在分集卡片上编辑，季资料在季标题右侧编辑。</p>
+        </div>
+      </div>
+      <div class="lib-fields">
+        ${field('title', '剧名', film.title)}
+        ${field('original_title', '原始标题', film.original_title)}
+        <label>演员（用顿号或逗号分隔）<input data-lib-field="actress" value="${escape(names.join('、'))}"></label>
+        ${field('release_date', '首播日期', film.release_date, ' placeholder="YYYY-MM-DD"')}
+        ${field('studio', '电视台 / 制作', film.studio)}
+        <label class="lib-plot">剧情简介<textarea data-lib-field="plot" rows="5">${escape(film.plot)}</textarea></label>
+      </div>
+      <details class="lib-nfo">
+        <summary>原始 NFO（tvshow.nfo）</summary>
+        <p class="muted">高级编辑：直接修改 XML。保存前会校验根节点是否为 &lt;tvshow&gt;，并保留一份 .bak 备份。</p>
+        <textarea data-lib-nfo rows="10" spellcheck="false"></textarea>
+        <div class="lib-nfo-actions"><button class="button secondary" type="button" data-lib-nfo-reload>重新读取</button><button class="button secondary" type="button" data-lib-nfo-save>保存原始 NFO</button><span class="muted" data-lib-nfo-state></span></div>
+      </details>`;
+  }
+
+  /** 分集详情：标题/简介/播出日期，写进该集自己的 <episodedetails> NFO */
+  function episodeDetailMarkup(film) {
+    const status = toneFor(film);
+    const still = film.cover_path
+      ? `<img alt="" src="${coverUrl(film)}">`
+      : '<span class="lib-cover-text">无剧照</span>';
+    const field = (name, label, value, extra = '') => `<label>${label}<input data-lib-field="${name}" value="${escape(value ?? '')}"${extra}></label>`;
+    const names = (Array.isArray(film.actress) ? film.actress : String(film.actress || '').split(/[、,，;；]/))
+      .map((name) => String(name || '').trim()).filter(Boolean);
+    return `<div class="lib-detail-head">
+        <div class="lib-detail-cover lib-detail-cover--wide${film.cover_path ? '' : ' lib-cover--empty'}">${still}</div>
+        <div class="lib-detail-summary">
+          <span class="lib-badge" data-tone="${status.tone}">${status.label}</span>
+          <p class="muted">${escape(episodeLabel(film))}${film.title ? ` · ${escape(film.title)}` : ''}</p>
+          <p class="muted">文件：${escape(film.video_path || '')}</p>
+          <p class="muted">资料写入：${escape(film.nfo_path || '保存后在该集旁边创建 NFO')}</p>
+          <button class="button primary small" type="button" data-lib-play="${escape(film.id)}">播放</button>
+        </div>
+      </div>
+      <div class="lib-fields">
+        ${field('title', '分集标题', film.title)}
+        <label>演员（用顿号或逗号分隔）<input data-lib-field="actress" value="${escape(names.join('、'))}"></label>
+        ${field('release_date', '播出日期', film.release_date, ' placeholder="YYYY-MM-DD"')}
+        ${field('runtime', '时长（分钟）', film.runtime || '', ' type="number" min="0" max="640000"')}
+        <label class="lib-plot">本集简介<textarea data-lib-field="plot" rows="5">${escape(film.plot)}</textarea></label>
+      </div>
+      <details class="lib-nfo">
+        <summary>原始 NFO（分集）</summary>
+        <p class="muted">高级编辑：直接修改 XML。保存前会校验根节点是否为 &lt;episodedetails&gt;，并保留一份 .bak 备份。</p>
+        <textarea data-lib-nfo rows="10" spellcheck="false"></textarea>
+        <div class="lib-nfo-actions"><button class="button secondary" type="button" data-lib-nfo-reload>重新读取</button><button class="button secondary" type="button" data-lib-nfo-save>保存原始 NFO</button><span class="muted" data-lib-nfo-state></span></div>
+      </details>`;
+  }
+
+  // ------------------------------------------------------- 季资料（season.nfo）
+  function parseSeasonNfo(content) {
+    if (!content || !content.trim()) return { name: '', plot: '' };
+    try {
+      const doc = new DOMParser().parseFromString(content, 'application/xml');
+      if (!doc || doc.querySelector('parsererror')) return { name: '', plot: '' };
+      return {
+        name: doc.querySelector('name')?.textContent || '',
+        plot: doc.querySelector('plot')?.textContent || '',
+      };
+    } catch (error) {
+      return { name: '', plot: '' };
+    }
+  }
+
+  /** 用 DOM 改标签，保留 season.nfo 里其它程序写的标签（tmdbid、poster 等）。 */
+  function buildSeasonNfo(season, name, plot, existing) {
+    const parser = new DOMParser();
+    let doc = null;
+    if (existing && existing.trim()) {
+      try {
+        const parsed = parser.parseFromString(existing, 'application/xml');
+        if (parsed && !parsed.querySelector('parsererror') && parsed.documentElement.nodeName === 'season') {
+          doc = parsed;
+        }
+      } catch (error) {
+        doc = null;
+      }
+    }
+    if (!doc) doc = parser.parseFromString('<season/>', 'application/xml');
+    const root = doc.documentElement;
+    const setTag = (tag, value) => {
+      let node = root.querySelector(tag);
+      if (!node) {
+        node = doc.createElement(tag);
+        root.appendChild(node);
+      }
+      node.textContent = value;
+    };
+    setTag('seasonnumber', String(season));
+    setTag('name', name);
+    setTag('plot', plot);
+    return new XMLSerializer().serializeToString(doc);
+  }
+
+  async function openSeasonDialog(season) {
+    const series = state.seriesInfo;
+    if (!series) return;
+    try {
+      const nfo = await api(`/api/library/series/${encodeURIComponent(series.id)}/season-nfo?season=${season}`);
+      state.seasonTarget = Number(season) || 1;
+      state.seasonNfo = nfo || { content: '', mtime: 0 };
+      const parsed = parseSeasonNfo(state.seasonNfo.content);
+      const title = el('library-season-title');
+      if (title) title.textContent = `${SEASON_LABEL(state.seasonTarget)} · 季资料`;
+      const path = el('library-season-path');
+      if (path) path.textContent = state.seasonNfo.path ? `写入：${state.seasonNfo.path}` : '';
+      const nameInput = el('library-season-name');
+      if (nameInput) nameInput.value = parsed.name;
+      const plotInput = el('library-season-plot');
+      if (plotInput) plotInput.value = parsed.plot;
+      const message = el('library-season-message');
+      if (message) message.textContent = '';
+      const save = el('library-season-save');
+      if (save) save.disabled = !isAdmin();
+      const dialog = el('library-season-dialog');
+      if (dialog) {
+        if (dialog.open) dialog.close();
+        dialog.showModal();
+      }
+    } catch (error) {
+      showToast(error.message || '读取季资料失败', 'danger');
+    }
+  }
+
+  async function saveSeasonNfo() {
+    const series = state.seriesInfo;
+    if (!series || state.busy) return;
+    const season = Number(state.seasonTarget) || 1;
+    const name = (el('library-season-name')?.value || '').trim();
+    const plot = (el('library-season-plot')?.value || '').trim();
+    const message = el('library-season-message');
+    state.busy = true;
+    if (message) message.textContent = '正在保存…';
+    try {
+      const content = buildSeasonNfo(season, name, plot, state.seasonNfo?.content || '');
+      const saved = await api(`/api/library/series/${encodeURIComponent(series.id)}/season-nfo`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          season,
+          content,
+          expected_mtime: Number(state.seasonNfo?.mtime) || null,
+        }),
+      });
+      state.seasonNfo = saved;
+      showToast('季资料已保存');
+      el('library-season-dialog')?.close();
+    } catch (error) {
+      if (message) message.textContent = error.message || '保存失败';
+    } finally {
+      state.busy = false;
+    }
   }
 
   async function openFilm(filmId) {
@@ -1937,6 +2127,18 @@
       refresh();
       return;
     }
+    const editTarget = event.target.closest('[data-lib-edit]');
+    if (editTarget) {
+      event.preventDefault();
+      openFilm(editTarget.dataset.libEdit);
+      return;
+    }
+    const seasonEdit = event.target.closest('[data-lib-season-edit]');
+    if (seasonEdit) {
+      event.preventDefault();
+      openSeasonDialog(Number(seasonEdit.dataset.libSeasonEdit) || 1);
+      return;
+    }
     const seasonTab = event.target.closest('[data-lib-season]');
     if (seasonTab) {
       event.preventDefault();
@@ -2010,6 +2212,7 @@
         .finally(() => { button.disabled = false; });
       return;
     }
+    if (event.target.closest('#library-season-save')) { saveSeasonNfo(); return; }
     if (event.target.closest('#library-film-save')) { saveFilm({ scrape: false }); return; }
     if (event.target.closest('#library-film-scrape')) { saveFilm({ scrape: true }); return; }
   });
@@ -2044,7 +2247,8 @@
       addFolder();
       return;
     }
-    if (event.target.id === 'library-settings-form' || event.target.id === 'library-film-form') {
+    if (event.target.id === 'library-settings-form' || event.target.id === 'library-film-form'
+        || event.target.id === 'library-season-form') {
       event.preventDefault();
       return;
     }
@@ -2073,6 +2277,7 @@
       // 剧集库：卡片、剧集头部、季标签 + 分集行
       seriesCardMarkup, seriesHeaderMarkup, episodesMarkup, episodeRowMarkup, render, gridMarkup,
       activeKind, seriesMode, SEASON_LABEL, episodeLabel, episodeNeighbors, groupNavMarkup, updateEpisodeNav,
+      detailMarkup, parseSeasonNfo, buildSeasonNfo,
     },
 
   };

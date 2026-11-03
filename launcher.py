@@ -96,7 +96,7 @@ def main() -> None:
         server.should_exit = True
         icon.stop()
 
-    icon = pystray.Icon("JavSP WEB", image, "JavSP WEB", menu=pystray.Menu(pystray.MenuItem("打开控制端", open_web, default=True), pystray.MenuItem("退出", exit_app)))
+    icon = pystray.Icon("JavSP Next", image, "JavSP Next", menu=pystray.Menu(pystray.MenuItem("打开控制端", open_web, default=True), pystray.MenuItem("退出", exit_app)))
     webbrowser.open("http://127.0.0.1:8090/login")
     icon.run()
 
