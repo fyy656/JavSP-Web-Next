@@ -21,7 +21,7 @@ exe = EXE(
     a.scripts,
     a.binaries,
     a.datas,
-    name="JavSP-Next",
+    name="JavSP-Web-Next",
     icon=str(root / "javsp_web" / "web" / "assets" / "javsp-logo.ico"),
     console=False,
     onefile=True,

@@ -5,7 +5,7 @@
 ## 命名调整
 
 - 产品名由「JavSP WEB」改为「JavSP Next」，网页标题、登录页、托盘与接口名称同步更新。
-- Windows 单文件包更名为 **`JavSP-Next.exe`**（原 `JavSP-Web.exe`）。
+- Windows 单文件包命名为 **`JavSP-Web-Next-2.3.2.exe`**（包名带版本号）。
 
 ## 新增
 
@@ -25,8 +25,8 @@
 
 ## 升级方式
 
-- Windows：下载本页面的 `JavSP-Next.exe`，保留原 `data` 目录即可（可从 `JavSP-Web.exe` 直接替换）。
+- Windows：下载本页面的 `JavSP-Web-Next-2.3.2.exe`，保留原 `data` 目录即可（可从旧版 exe 直接替换）。
 - Docker：`docker pull ghcr.io/fyy656/javsp-web-next:2.3.2`（或 `:latest`）。
-- Android：安装 `JavSP-for-Android-v2.3.2.apk`（应用内版本号 1.0.0），与旧版可覆盖安装。
+- Android：安装 `JavSP-for-Android-1.0.0.apk`（应用内版本号 1.0.0，versionCode 1）。
 
 本版没有破坏性的数据结构变更，可直接覆盖升级。
