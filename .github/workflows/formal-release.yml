@@ -84,7 +84,18 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: android-actions/setup-android@v3
+      # 运行器自带 Android SDK；不装 android-actions/setup-android，
+      # 它的 v3 会去安装已被移除的 "tools" 包导致任务直接失败。
+      - name: Check Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          SDKMANAGER=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
+          echo "sdkmanager=$SDKMANAGER"
+          if [ ! -d "$ANDROID_HOME/platforms/android-35" ] || [ ! -d "$ANDROID_HOME/build-tools/35.0.0" ]; then
+            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+            "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+          fi
+          ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools"
       - name: Restore signing config
         working-directory: android
         run: |
